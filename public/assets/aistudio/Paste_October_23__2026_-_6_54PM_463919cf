@@ -1,0 +1,954 @@
+# MASTER IMPLEMENTATION PROMPT — MEETMIND AI
+## Transform the Existing Frontend into a Fully Functional, Production-Ready AI Meeting & Lecture Intelligence Platform
+
+### 1. YOUR ROLE AND MISSION
+
+Act as a principal full-stack software architect, senior React/TypeScript engineer, senior ASP.NET Core backend engineer, AI/ML engineer, database architect, DevOps engineer, and application security specialist.
+
+You are given the complete existing frontend source code for **MeetMind AI**, an Intelligent Meeting & Lecture Assistant.
+
+Your mission is to transform this existing frontend project into a complete, functional, secure, testable, deployable software product.
+
+This is not a request to create a landing page, a UI prototype, a static dashboard, or a collection of disconnected demo screens.
+
+Build a real application with working authentication, persistent database storage, actual audio transcription, AI-powered analysis, functional workflows, reliable APIs, error handling, automated tests, and deployment documentation.
+
+**The existing frontend source code is the starting point and must be preserved, inspected, understood, and extended. Do not discard it and generate an unrelated application.**
+
+Work directly inside the supplied repository.
+
+Do not merely explain what needs to be done. Inspect the codebase, implement the necessary changes, create the missing services, run available checks, fix errors, and document anything that genuinely requires external credentials or manual infrastructure setup.
+
+---
+
+### 2. PROJECT IDENTITY AND PURPOSE
+
+Product name: MeetMind AI
+
+Product description: Intelligent Meeting & Lecture Assistant.
+
+Primary objective: Convert meetings, lectures, recordings, and spoken discussions into searchable, structured, actionable knowledge.
+
+The platform serves two major use cases.
+
+**Business Meetings**
+- Transcribe meetings into readable text.
+- Generate accurate meeting summaries.
+- Extract key discussion points.
+- Identify decisions and agreements.
+- Extract action items, owners, and deadlines when explicitly supported by the conversation.
+- Identify important terms and topics.
+- Allow users to ask questions about meeting content.
+- Organize meetings and track follow-up tasks.
+- Generate downloadable meeting reports.
+
+**Educational Lectures**
+- Transcribe lectures.
+- Generate structured lecture notes.
+- Extract definitions, concepts, key points, and important terminology.
+- Identify explicitly emphasized exam-related information.
+- Generate quizzes and multiple-choice questions.
+- Generate flashcards.
+- Support interactive revision and self-assessment.
+- Allow students to search lecture transcripts and ask questions grounded in the actual lecture content.
+
+The application must support both modes through a shared platform while keeping their workflows, labels, generated outputs, and user experiences appropriately distinct.
+
+Never fabricate meeting decisions, speaker identities, task owners, dates, lecture facts, or quotations. When information is missing or uncertain, explicitly represent that uncertainty.
+
+---
+
+### 3. FIRST ACTION: AUDIT THE ENTIRE EXISTING REPOSITORY
+
+Before modifying code, inspect the complete repository, including:
+
+- package.json and the lockfile.
+- Existing TanStack Start and TanStack Router configuration.
+- All file-based routes.
+- Root route, providers, layouts, and application shell.
+- Dashboard and analytics components.
+- Meeting and lecture pages.
+- Transcript, AI workspace, mind map, flashcard, quiz, and report pages.
+- Calendar, notifications, global search, user management, settings, profile, and administrative pages.
+- Shared UI components, hooks, stores, types, utilities, and styles.
+- Existing design-system documentation.
+- Environment configuration and build scripts.
+- Every location containing mock data, placeholder handlers, simulated AI results, or nonfunctional buttons.
+
+Produce a concise implementation inventory identifying:
+
+1. What already works.
+2. What is currently only a visual mockup.
+3. What requires backend integration.
+4. What is missing entirely.
+5. Existing dependencies that should be retained.
+6. Existing implementation risks and architectural constraints.
+
+Do not stop after producing this inventory. Continue into implementation.
+
+Use the actual repository structure and existing conventions rather than assuming that files or components exist at paths you have not verified.
+
+---
+
+### 4. PRESERVE THE EXISTING FRONTEND TECHNOLOGY STACK
+
+The supplied project uses the following technology stack:
+
+- React 19.
+- TypeScript.
+- TanStack Start.
+- TanStack Router with file-based routes.
+- Vite.
+- Tailwind CSS 4.
+- shadcn/ui and Radix UI components.
+- Framer Motion.
+- Lucide React.
+- TanStack React Query.
+- Zustand.
+- Recharts.
+- Existing form and validation dependencies.
+
+Preserve these technologies wherever practical.
+
+Do not replace TanStack Start with Next.js, Create React App, or a different application framework without a demonstrated technical necessity.
+
+Do not downgrade React or replace the routing architecture simply to make implementation easier.
+
+Keep the existing design system, typography, color tokens, shared components, responsive layouts, and interaction patterns.
+
+Refactor only when needed for maintainability, correctness, security, or integration.
+
+Use strict TypeScript types. Avoid `any` where practical, eliminate unnecessary duplication, and do not introduce new dependencies without a clear reason.
+
+Maintain compatibility with the repository's actual installed package versions and lockfile.
+
+---
+
+### 5. REQUIRED SYSTEM ARCHITECTURE
+
+Implement a maintainable architecture with clear service boundaries.
+
+#### A. Web Frontend
+
+Use the existing React and TypeScript application.
+
+Responsibilities:
+- User interface and navigation.
+- Authentication screens and protected routes.
+- Audio recording and upload interfaces.
+- Processing progress and status.
+- Transcript presentation.
+- AI-generated summaries and structured results.
+- Task management, quiz interactions, flashcards, reports, search, and analytics.
+- API communication and client-side validation.
+- Error handling and responsive behavior.
+
+#### B. Backend API
+
+Use C# and ASP.NET Core Web API.
+
+Responsibilities:
+- Authentication and authorization.
+- User, organization, and workspace management.
+- Meeting and lecture metadata.
+- Recording upload coordination.
+- Transcription and AI-analysis job orchestration.
+- Persistent storage of transcripts and analysis results.
+- Tasks, quizzes, flashcards, reports, and search.
+- Validation, rate limiting, access control, audit events, and API documentation.
+- Integration with the AI service.
+
+Use the current supported .NET LTS version available in the implementation environment. Prefer .NET 10 LTS when all dependencies and deployment targets support it; otherwise use .NET 8 LTS and document the version decision.
+
+#### C. AI Service
+
+Use Python and FastAPI for AI-specific workloads.
+
+Responsibilities:
+- Audio preprocessing.
+- Speech-to-text transcription.
+- Timestamped transcript segments.
+- Speaker diarization when supported by the configured model.
+- Language detection.
+- Transcript summarization.
+- Keyword and topic extraction.
+- Action-item and decision extraction.
+- Lecture-note generation.
+- Quiz and flashcard generation.
+- Retrieval-grounded question answering.
+- Structured result validation.
+
+#### D. Database
+
+Use Microsoft SQL Server for persistent application data.
+
+Use EF Core migrations for schema evolution.
+
+Never rely on in-memory collections, browser local storage, or mock arrays as the authoritative storage for real application data.
+
+#### E. Background Processing and File Storage
+
+Use a background-job architecture for long-running transcription and analysis.
+
+Select an appropriate queue and worker mechanism, such as a durable queue with a background worker, based on deployment requirements.
+
+Store uploaded recordings in private object storage or an equivalent durable storage service. Store file metadata and storage keys in SQL Server, not the binary contents of large recordings directly in ordinary meeting records.
+
+Support job retries, failure states, and safe handling of duplicate job submissions.
+
+The application must not require the browser to remain open for a long-running job to finish.
+
+#### F. Mobile Compatibility
+
+Keep the backend API suitable for a future Flutter mobile application.
+
+Use consistent authentication, authorization, validation, pagination, and response contracts across web and mobile clients.
+
+Do not build an unrelated mobile frontend as part of this task unless explicitly requested.
+
+---
+
+### 6. FRONTEND FUNCTIONALITY: IMPLEMENT THE EXISTING ROUTES
+
+Inspect the existing route files and implement each route according to its intended purpose.
+
+Do not assume that a route is functional merely because a page renders.
+
+#### Dashboard
+
+Display real, user-specific information:
+- Total meetings and lectures.
+- Recently processed recordings.
+- Pending and completed tasks.
+- Upcoming deadlines.
+- Processing jobs and failed jobs.
+- Recent AI-generated insights.
+- Activity history.
+- Meeting and lecture analytics.
+
+All figures and charts must derive from real API data.
+
+Handle loading, empty, error, and populated states correctly.
+
+#### Meetings
+
+Implement:
+- Meeting creation.
+- Meeting title, description, date, and mode.
+- Recording upload or attachment.
+- Meeting detail pages.
+- Transcript and summary access.
+- Decisions and action items.
+- Search, sorting, filtering, and pagination.
+- Editing metadata and deleting meetings with confirmation.
+- Correct ownership and permission checks.
+
+#### Lectures
+
+Implement:
+- Lecture creation and organization.
+- Lecture recording upload.
+- Transcript and structured notes.
+- Definitions and important concepts.
+- Exam-related highlights.
+- Generated quizzes and flashcards.
+- Search, filters, and persistent lecture history.
+
+#### AI Workspace
+
+Create a working workspace for:
+- Selecting an existing recording or transcript.
+- Running supported analysis operations.
+- Viewing the actual processing state.
+- Inspecting generated output.
+- Re-running analysis when appropriate.
+- Recovering from failed jobs.
+- Distinguishing generated content from user-edited content.
+
+Never display a successful result before the corresponding backend operation succeeds.
+
+#### Transcript Viewer
+
+Implement:
+- Full transcript display.
+- Timestamped segments.
+- Speaker labels where available.
+- Search within the transcript.
+- Highlighted keywords and important passages.
+- Navigation to transcript timestamps.
+- Clear visual distinction between verified transcript text and AI-generated annotations.
+- Editing or annotation features where supported by the existing UI.
+
+Do not invent speaker names. Use neutral speaker identifiers when diarization is available but identity is unknown.
+
+#### Action Items
+
+Implement:
+- Task creation and editing.
+- Assignment to authorized workspace members.
+- Due dates and priority.
+- Status changes.
+- Meeting or lecture references.
+- Completion tracking.
+- Filtering by owner, status, and due date.
+- Persistence and synchronization through the API.
+
+Tasks extracted by AI must remain reviewable and editable by users.
+
+#### Flashcards
+
+Implement:
+- Actual flashcards generated from lecture content.
+- Flip interactions.
+- Next and previous navigation.
+- Progress tracking.
+- Study sessions.
+- Optional review status.
+- Persistent study progress where appropriate.
+
+#### Quizzes
+
+Implement:
+- Quiz generation from actual transcripts.
+- Multiple-choice questions and supported question types.
+- Answer selection.
+- Answer validation.
+- Explanations grounded in the source material.
+- Score calculation.
+- Results review.
+- Quiz attempt history.
+
+Do not reveal correct answers before submission unless the quiz mode explicitly allows practice feedback.
+
+#### Mind Maps
+
+Implement mind-map generation from actual transcript content if supported by the existing component architecture.
+
+Persist generated maps and their relationships.
+
+If a reliable interactive diagram cannot be completed with existing dependencies, implement a clear structured topic hierarchy rather than presenting a fake interactive visualization.
+
+#### Reports and Analytics
+
+Implement reports derived from real database records.
+
+Support relevant export formats such as CSV and PDF when implemented reliably.
+
+Include clear date ranges, user/workspace filters, empty states, and appropriate access control.
+
+Do not hardcode chart series or report metrics.
+
+#### Calendar and Notifications
+
+Implement:
+- Calendar events and deadlines.
+- Meeting and lecture dates.
+- Task deadlines.
+- Real notification records.
+- Read/unread status.
+- Relevant links to the associated record.
+- Persistent notification state.
+
+Do not simulate real-time notifications with fabricated activity.
+
+#### Search
+
+Implement a global search across records the authenticated user is authorized to access.
+
+Support appropriate filtering across meetings, lectures, transcripts, tasks, and generated study materials.
+
+Use SQL-backed search or an appropriate search service.
+
+Search results must respect workspace and resource permissions.
+
+#### Settings, Profile, Users, and Administration
+
+Implement only features appropriate to the current user's permissions.
+
+Provide:
+- Profile information.
+- Account settings.
+- Workspace settings where applicable.
+- User and membership management for authorized administrators.
+- Role and permission management.
+- Safe account and resource deletion workflows.
+- Administrative audit visibility where required.
+
+Never expose other users' private recordings or transcripts.
+
+If a screen is not yet supported by a real backend operation, explicitly communicate its status rather than presenting a fake success message.
+
+---
+
+### 7. AUTHENTICATION AND AUTHORIZATION
+
+Implement real authentication.
+
+Required capabilities:
+- Account registration.
+- Secure login.
+- Logout.
+- Token refresh or another documented secure session-renewal strategy.
+- Password hashing using established framework-supported password hashing.
+- Password reset.
+- Email verification where required for production.
+- Protected frontend routes.
+- Protected backend endpoints.
+- User-specific data access.
+- Workspace membership and role-based permissions where applicable.
+- Session expiration and revocation behavior.
+
+Prefer secure, HttpOnly, Secure, SameSite cookies for browser sessions when compatible with the existing deployment architecture.
+
+Do not store long-lived authentication tokens or passwords in localStorage.
+
+Never trust frontend route guards as the only authorization mechanism.
+
+Derive user identity from the authenticated server-side principal. Do not trust a client-supplied user ID to authorize resource access.
+
+Implement ownership checks for every meeting, lecture, recording, transcript, task, report, and generated artifact.
+
+Use secure configuration for secrets. Never commit real credentials, private API keys, signing secrets, or database passwords.
+
+Do not add Google Sign-In or other third-party authentication unless explicitly requested.
+
+---
+
+### 8. REAL SPEECH-TO-TEXT PIPELINE
+
+Implement actual transcription rather than simulated transcription.
+
+Support configurable speech-recognition providers, including a local Whisper-based implementation where appropriate.
+
+The pipeline must:
+
+1. Validate the uploaded file.
+2. Enforce file-size and supported-format limits.
+3. Store the recording securely.
+4. Create a persistent processing job.
+5. Normalize or preprocess audio when necessary.
+6. Run the configured transcription engine.
+7. Detect the language when supported.
+8. Persist the transcript and timestamped segments.
+9. Update job status and progress.
+10. Trigger downstream analysis.
+11. Expose results through authenticated API endpoints.
+
+Support common audio formats and video files with audio tracks when the chosen processing stack supports them.
+
+Use FFmpeg or an equivalent maintained tool for media conversion where necessary.
+
+Handle:
+- Empty files.
+- Unsupported codecs.
+- Corrupted media.
+- Silent recordings.
+- Long recordings.
+- Interrupted jobs.
+- Model-loading failures.
+- Timeouts.
+- Resource exhaustion.
+- Retryable and non-retryable errors.
+
+Do not promise a fixed transcription duration. Processing time depends on recording length, hardware, language, model selection, and workload.
+
+Persist genuine job states such as:
+
+`Queued → Uploading/Validating → Transcribing → Analyzing → Completed`
+
+Also support `Failed` and `Cancelled` where applicable.
+
+Progress percentages must reflect actual pipeline stages or measured work. Never fabricate progress simply to create an animation.
+
+---
+
+### 9. AI ANALYSIS PIPELINE
+
+Implement a provider abstraction so the AI engine can be configured without rewriting the business logic.
+
+Support a local LLM provider and an optional hosted provider such as OpenAI through server-side configuration.
+
+The system must not depend on a hardcoded API key.
+
+Create validated, typed output contracts for:
+
+- Summary.
+- Key points.
+- Topics and keywords.
+- Decisions.
+- Action items.
+- Owners and due dates when supported by evidence.
+- Important quotations with timestamps when available.
+- Lecture notes and definitions.
+- Exam-related highlights.
+- Quiz questions and answer explanations.
+- Flashcards.
+- Follow-up questions.
+- Source references.
+
+Use structured output or JSON schema validation where supported.
+
+Validate AI responses on the server. Reject or repair malformed output safely, with bounded retries.
+
+Treat transcripts as untrusted input. A transcript may contain prompt-injection attempts or instructions spoken by participants. Never allow transcript content to override system instructions, expose secrets, invoke unauthorized tools, or bypass access controls.
+
+Require AI-generated answers to be grounded in the relevant transcript or retrieved source segments.
+
+For question answering:
+- Retrieve relevant transcript segments.
+- Include timestamps or source references where available.
+- Distinguish direct evidence from inference.
+- Say when the transcript does not contain enough information.
+- Never invent facts to make an answer sound complete.
+
+For extracted action items:
+- Do not assign an owner unless evidence supports it.
+- Do not invent deadlines.
+- Mark uncertain fields appropriately.
+- Allow human review and correction.
+
+For lecture quizzes:
+- Validate that each correct answer index refers to a real option.
+- Check for missing questions, empty answers, and malformed explanations.
+- Prefer questions answerable from the lecture itself.
+
+If an AI provider is unavailable, return a meaningful error and preserve the transcript so processing can be retried.
+
+Do not silently replace a failed AI response with fabricated content.
+
+---
+
+### 10. API DESIGN AND INTEGRATION
+
+Create a versioned REST API, preferably under `/api/v1`.
+
+Define request and response DTOs separately from database entities.
+
+Implement consistent validation, error responses, status codes, and pagination.
+
+Provide endpoints for the following capabilities, adapting names to the actual implementation:
+
+- Authentication and account management.
+- Meetings and lectures.
+- Upload initialization and completion.
+- Recording metadata.
+- Transcription jobs.
+- Job status and cancellation.
+- Transcript retrieval and editing.
+- AI analysis.
+- Question answering.
+- Action items.
+- Flashcards and study sessions.
+- Quizzes and attempts.
+- Reports and exports.
+- Search.
+- Calendar events.
+- Notifications.
+- Profile and workspace settings.
+- Authorized user administration.
+
+For long-running operations, return an appropriate job identifier and HTTP status such as `202 Accepted`.
+
+Provide an authenticated job-status endpoint and a reliable way for the frontend to observe completion. Use polling initially if it is sufficient; introduce SignalR or Server-Sent Events only when the added complexity is justified.
+
+Use React Query for server-state fetching, caching, invalidation, and mutation handling.
+
+Centralize API configuration, authentication handling, error normalization, and typed response contracts.
+
+Avoid direct database access from the frontend.
+
+Generate and maintain OpenAPI documentation.
+
+Document all required environment variables and API contracts.
+
+---
+
+### 11. DATABASE DESIGN
+
+Create a normalized SQL Server schema using EF Core migrations.
+
+Include the entities needed for the implemented features, such as:
+
+- Users.
+- Workspaces.
+- Workspace memberships.
+- Meetings.
+- Lectures.
+- Recordings.
+- Processing jobs.
+- Transcript segments.
+- Analysis results.
+- Decisions.
+- Action items.
+- Keywords or topics.
+- Quizzes.
+- Quiz questions.
+- Quiz attempts and answers.
+- Flashcards.
+- Study progress.
+- Calendar events.
+- Notifications.
+- Audit records where appropriate.
+
+Use appropriate:
+- Primary and foreign keys.
+- Indexes.
+- Unique constraints.
+- Created and updated timestamps.
+- UTC date storage.
+- Referential integrity.
+- Soft deletion only where justified.
+- Optimistic concurrency where needed.
+
+Do not store all business data inside one unstructured JSON column. JSON may be appropriate for versioned AI output or provider-specific metadata, but core entities must remain queryable and relational.
+
+Persist all essential application state across restarts and deployments.
+
+Implement migrations and a repeatable database initialization strategy.
+
+Do not automatically drop or recreate production databases at startup.
+
+Provide backup and restoration documentation.
+
+---
+
+### 12. RECORDING STORAGE AND PRIVACY
+
+Recording files and transcripts can contain confidential business information and personal data.
+
+Implement:
+- Private storage by default.
+- Authorization before downloads.
+- Short-lived signed URLs where appropriate.
+- File-type and size validation.
+- Safe generated storage names.
+- Malware-scanning integration or a clearly documented deployment requirement.
+- Configurable retention and deletion policies.
+- Secure deletion workflows.
+- Upload and processing quotas.
+- Appropriate audit events.
+- Protection against path traversal and unsafe file handling.
+
+Do not expose private object-storage URLs or provider credentials.
+
+Do not log full transcripts, passwords, API keys, or sensitive recording content unnecessarily.
+
+Document recording consent, retention, and access requirements.
+
+Do not claim regulatory compliance without an actual assessment and supporting implementation.
+
+---
+
+### 13. DESIGN AND USER EXPERIENCE
+
+Preserve the existing MeetMind AI design system and the visual identity already implemented in the repository.
+
+The target experience is a premium, dark-first enterprise SaaS product.
+
+Maintain:
+- Existing typography.
+- Indigo and violet primary tones.
+- Electric cyan accents.
+- Restrained gradients.
+- Consistent spacing and rounded surfaces.
+- Readable information-dense layouts.
+- Existing component conventions.
+- Subtle, purposeful Framer Motion transitions.
+- Responsive behavior.
+
+Keep dark and light themes functional if already present.
+
+Ensure all major workflows work on desktop, tablet, and mobile.
+
+Implement:
+- Loading skeletons.
+- Useful empty states.
+- Clear error messages.
+- Confirmation dialogs for destructive actions.
+- Accessible labels and keyboard navigation.
+- Focus management for dialogs.
+- Responsive tables and forms.
+- Appropriate contrast.
+- Toast notifications only after actual operations succeed.
+
+Do not replace real application pages with static screenshots or decorative mockups.
+
+Do not redesign the entire application unnecessarily.
+
+Improve existing screens incrementally and consistently.
+
+---
+
+### 14. REMOVE MOCK DATA FROM PRODUCTION FLOWS
+
+Search the entire codebase for:
+- Hardcoded meetings and lectures.
+- Mock dashboard metrics.
+- Fake analytics.
+- Placeholder AI summaries.
+- Simulated transcript results.
+- Fake notifications.
+- Buttons that only show alerts or toast messages.
+- Forms that do not submit to the backend.
+- In-memory business data.
+- TODOs and unfinished handlers.
+
+Replace these in real application flows with backend integration.
+
+Mock data may remain in isolated Storybook, test fixtures, or explicitly labeled development demos, but never silently appear as actual user data.
+
+Do not show a success toast unless the server confirms success.
+
+Do not show a recording as processed until its persisted job state confirms completion.
+
+When no data exists, display a meaningful empty state and a clear next action.
+
+---
+
+### 15. TESTING AND QUALITY ASSURANCE
+
+Create a practical automated testing strategy.
+
+#### Frontend
+- TypeScript type checking.
+- Production build.
+- ESLint.
+- Component tests where appropriate.
+- API integration tests.
+- Authentication and protected-route tests.
+- Form validation tests.
+- Loading, empty, and error-state tests.
+- Tests for key user workflows.
+
+#### Backend
+- Unit tests.
+- API integration tests.
+- Authentication and authorization tests.
+- Cross-user resource-access tests.
+- Database persistence tests.
+- Validation and error-handling tests.
+- Upload and job-status tests.
+- AI provider failure tests.
+
+#### AI Service
+- Health-check tests.
+- Supported-format validation.
+- Invalid and empty file tests.
+- Transcription response schema tests.
+- Analysis schema-validation tests.
+- Malformed model-output tests.
+- Provider-unavailable tests.
+- Grounding and uncertainty behavior tests.
+
+Use mocked providers in automated tests where appropriate, but keep these mocks isolated from production execution.
+
+Do not claim that a test passed unless you actually executed it and observed the result.
+
+Run the available checks and fix errors before declaring completion.
+
+If infrastructure prevents a test from running, document the exact blocker and provide a reproducible command.
+
+---
+
+### 16. DEVOPS AND DEPLOYMENT
+
+Provide a reproducible local development environment using Docker Compose where practical.
+
+Include:
+- Frontend.
+- ASP.NET Core backend.
+- SQL Server.
+- Python AI service.
+- Required worker and queue services.
+- Storage configuration.
+- Health checks.
+- Persistent database volumes.
+- Environment-based configuration.
+
+Create appropriate Dockerfiles and `.dockerignore` files.
+
+Do not embed production secrets in images.
+
+Do not expose internal services publicly unless required.
+
+Document a production deployment architecture with HTTPS, managed database hosting, private object storage, secret management, logging, monitoring, backups, and resource limits.
+
+Provide:
+- `.env.example` containing placeholders only.
+- Local startup instructions.
+- Database migration instructions.
+- AI provider setup instructions.
+- Test commands.
+- Build commands.
+- Production deployment steps.
+- Troubleshooting documentation.
+
+Do not claim that deployment is complete until the actual target environment has been configured and verified.
+
+---
+
+### 17. IMPLEMENTATION WORKFLOW
+
+Execute the work in the following order.
+
+**Phase 1 — Repository audit**
+Inspect the entire repository, document the actual structure, identify existing features, and map each route to its required API integration.
+
+**Phase 2 — Architecture and contracts**
+Define data models, authentication strategy, API contracts, job lifecycle, database schema, storage boundaries, and AI provider interfaces.
+
+**Phase 3 — Backend foundation**
+Create the ASP.NET Core API, EF Core migrations, SQL Server integration, authentication, authorization, validation, and OpenAPI documentation.
+
+**Phase 4 — AI service**
+Implement transcription, analysis providers, structured outputs, transcript grounding, error handling, and health checks.
+
+**Phase 5 — Background processing and storage**
+Implement durable job handling, private recording storage, retries, progress tracking, and persistent job status.
+
+**Phase 6 — Frontend integration**
+Connect the existing pages and components to real APIs. Remove production mock data. Preserve the design and existing routing architecture.
+
+**Phase 7 — Functional workflows**
+Complete authentication, upload, processing, transcript review, AI summaries, tasks, quizzes, flashcards, search, reports, and other supported features.
+
+**Phase 8 — Testing and hardening**
+Run builds, type checks, linting, automated tests, and integration tests. Fix the failures that can be reproduced.
+
+**Phase 9 — Deployment readiness**
+Finalize environment configuration, Docker setup, migrations, documentation, health checks, security configuration, and deployment instructions.
+
+At the end of each phase:
+- Summarize what changed.
+- List important files created or modified.
+- State which commands were executed.
+- Report actual test results.
+- Identify unresolved blockers.
+- Continue to the next phase without waiting for approval unless an external decision or credential is genuinely required.
+
+Do not stop after generating a plan, a schema, a landing page, or a basic API skeleton.
+
+---
+
+### 18. ENGINEERING RULES
+
+Follow these non-negotiable rules:
+
+1. Inspect files before editing them.
+2. Preserve existing working features.
+3. Use the existing framework and design system.
+4. Write maintainable, typed, production-oriented code.
+5. Keep business logic out of React components where appropriate.
+6. Validate all external input on the server.
+7. Enforce authorization at the API and data-access boundaries.
+8. Never trust client-supplied ownership or permission claims.
+9. Never hardcode secrets or API keys.
+10. Never fabricate AI output, transcription results, metrics, or task status.
+11. Never silently swallow important errors.
+12. Never delete or reset existing persistent data during routine startup.
+13. Never claim that untested functionality works.
+14. Never leave primary user-facing actions as decorative buttons.
+15. Never create a second competing implementation when an existing component can be extended safely.
+16. Avoid unnecessary abstractions and dependency sprawl.
+17. Document architectural decisions and genuine limitations.
+18. Use database migrations rather than destructive schema recreation.
+19. Make retries safe and avoid duplicate processing.
+20. Prioritize data integrity, privacy, reliability, and maintainability over superficial feature counts.
+
+If a required feature depends on an external API key, paid service, cloud account, or deployment credential, implement the integration and configuration pathway, document the requirement, and test all available behavior without inventing credentials.
+
+If a local model is selected, document its hardware, download, and runtime requirements.
+
+If a feature cannot be completed safely or reliably, state precisely what remains instead of marking it as complete.
+
+---
+
+### 19. DEFINITION OF DONE
+
+The project is considered implementation-complete only when the applicable criteria below have been verified.
+
+**Frontend**
+- Existing routes render correctly.
+- Navigation works.
+- Responsive layouts work.
+- Forms submit correctly.
+- Loading, empty, success, and failure states work.
+- Production mock data has been removed from real workflows.
+
+**Authentication**
+- Users can register and log in.
+- Sessions are handled securely.
+- Protected endpoints reject unauthenticated access.
+- Users cannot access unauthorized records.
+
+**Audio processing**
+- A valid recording can be uploaded.
+- The file is stored safely.
+- A persistent processing job is created.
+- The configured transcription engine produces actual transcript text.
+- Transcript results are persisted.
+- Job status survives application restarts.
+- Failures are reported accurately and can be retried where appropriate.
+
+**AI analysis**
+- A configured model produces real analysis.
+- Results conform to validated schemas.
+- Summaries, tasks, and quizzes are based on source content.
+- Missing information is represented honestly.
+- Provider failures do not generate fake success.
+
+**Persistence**
+- Meetings, lectures, transcripts, and analysis results survive restarts.
+- Database migrations are reproducible.
+- Data isolation is enforced.
+
+**Testing**
+- Production builds complete successfully.
+- Type checking and linting results are reported accurately.
+- Critical workflows have automated coverage.
+- Known failures and untested external dependencies are documented.
+
+**Deployment**
+- Local startup instructions work in the tested environment.
+- Environment variables are documented.
+- Health checks are available.
+- Production deployment requirements are documented.
+- Secrets are not committed.
+
+Do not describe the system as production-ready solely because the interface looks complete or the development server starts successfully.
+
+---
+
+### 20. FINAL DELIVERABLES
+
+Deliver a working, organized repository containing:
+
+1. The preserved and fully integrated MeetMind AI frontend.
+2. The ASP.NET Core backend source code.
+3. The Python AI service source code.
+4. SQL Server data models and EF Core migrations.
+5. Secure authentication and authorization.
+6. Real transcription and AI analysis integrations.
+7. Background processing and job-status management.
+8. Private recording-storage integration.
+9. Automated tests for critical workflows.
+10. Docker and local development configuration.
+11. Environment-variable examples.
+12. OpenAPI documentation.
+13. A comprehensive README.
+14. Deployment and troubleshooting documentation.
+15. A final implementation report listing completed features, tested commands, actual results, external requirements, and remaining limitations.
+
+### FINAL INSTRUCTION
+
+Begin by inspecting the complete supplied MeetMind AI frontend repository.
+
+Then implement the missing backend, database, AI service, and integrations directly within the existing project or a clearly organized monorepo.
+
+Preserve the existing frontend identity and framework.
+
+Work incrementally, run real checks, fix actual failures, and maintain a working repository throughout the process.
+
+**The objective is a genuinely functional, secure, persistent, testable, deployable MeetMind AI application—not a visual demo, not a generated code outline, and not a collection of mocked features.**
+
+Start with the repository audit, then proceed with implementation immediately.

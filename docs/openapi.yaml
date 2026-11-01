@@ -1,0 +1,187 @@
+openapi: 3.1.0
+info:
+  title: MeetMind AI REST API
+  description: Official versioned API contract for MeetMind AI Meeting & Lecture Intelligence Platform.
+  version: 1.0.0
+servers:
+  - url: /api/v1
+    description: Current Environment API Server
+paths:
+  /auth/login:
+    post:
+      summary: User Login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string }
+      responses:
+        "200":
+          description: Authenticated successfully
+        "401":
+          description: Invalid credentials
+
+  /auth/register:
+    post:
+      summary: Register new user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, name, password]
+              properties:
+                email: { type: string }
+                name: { type: string }
+                password: { type: string }
+                role: { type: string, enum: [admin, member, instructor, student] }
+      responses:
+        "201":
+          description: User created
+
+  /dashboard/metrics:
+    get:
+      summary: Get user and workspace dashboard metrics
+      responses:
+        "200":
+          description: Dashboard metrics retrieved
+
+  /meetings:
+    get:
+      summary: List all meetings
+      responses:
+        "200":
+          description: List of meetings
+    post:
+      summary: Create new meeting
+      responses:
+        "201":
+          description: Meeting created
+
+  /meetings/{id}:
+    get:
+      summary: Get meeting details by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Meeting details
+    delete:
+      summary: Delete meeting
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Meeting deleted
+
+  /lectures:
+    get:
+      summary: List all recorded lectures
+      responses:
+        "200":
+          description: List of lectures
+    post:
+      summary: Create new lecture
+      responses:
+        "201":
+          description: Lecture created
+
+  /recordings/upload:
+    post:
+      summary: Upload audio recording for speech transcription and AI analysis
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: { type: string, format: binary }
+                type: { type: string, enum: [meeting, lecture] }
+                title: { type: string }
+                courseCode: { type: string }
+      responses:
+        "202":
+          description: Accepted for processing
+
+  /jobs/{id}:
+    get:
+      summary: Poll status of background processing job
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Job status
+
+  /ai/ask:
+    post:
+      summary: Ask grounded question against verified transcript with citations
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question]
+              properties:
+                question: { type: string }
+                resourceId: { type: string }
+      responses:
+        "200":
+          description: Grounded answer with citations
+
+  /quizzes:
+    get:
+      summary: Get quizzes
+      responses:
+        "200":
+          description: List of quizzes
+
+  /quizzes/{id}/attempt:
+    post:
+      summary: Submit quiz answers for scoring and grounded explanation
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                answers: { type: object }
+      responses:
+        "200":
+          description: Score and feedback
+
+  /flashcards:
+    get:
+      summary: Get flashcards
+      responses:
+        "200":
+          description: List of flashcards
+
+  /reports/export:
+    get:
+      summary: Download audit CSV report
+      responses:
+        "200":
+          description: CSV file attachment

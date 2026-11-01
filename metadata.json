@@ -1,0 +1,6 @@
+{
+  "name": "MeetMind AI",
+  "description": "MeetMind AI records meetings and lectures, then generates summaries, action items, quizzes, flashcards, mind maps and reports — automatically.",
+  "permissions": [],
+  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

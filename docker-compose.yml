@@ -1,0 +1,68 @@
+version: "3.8"
+
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ConnectionStrings__DefaultConnection=Server=sqlserver,1433;Database=MeetMindDb;User Id=sa;Password=Your_password123!;TrustServerCertificate=True;
+      - AiService__BaseUrl=http://ai_service:8000
+      - Storage__RecordingsDirectory=/app/data/recordings
+    volumes:
+      - recordings_data:/app/data/recordings
+    depends_on:
+      - sqlserver
+      - ai_service
+    restart: unless-stopped
+
+  ai_service:
+    build:
+      context: ./services/ai_service
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      - WHISPER_MODEL=base
+    volumes:
+      - recordings_data:/data/recordings
+    restart: unless-stopped
+
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      - ACCEPT_EULA=Y
+      - SA_PASSWORD=Your_password123!
+      - MSSQL_PID=Developer
+    ports:
+      - "1433:1433"
+    volumes:
+      - mssql_data:/var/opt/mssql
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+volumes:
+  recordings_data:
+  mssql_data:
