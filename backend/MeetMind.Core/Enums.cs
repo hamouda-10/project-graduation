@@ -12,11 +12,30 @@ namespace MeetMind.Core.Enums
     {
         Queued,
         Uploading,
+        Uploaded,
+        Validating,
+        ExtractingAudio,
         Transcribing,
+        Translating,
+        Merging,
         Analyzing,
+        GeneratingQuiz,
         Completed,
         Failed,
         Cancelled
+    }
+
+    public enum JobFailureCategory
+    {
+        None,
+        MediaValidationError,
+        AudioExtractionError,
+        TranscriptionServiceError,
+        AiAnalysisError,
+        StorageError,
+        TimeoutError,
+        CancelledByUser,
+        UnknownError
     }
 
     public enum ResourceStatus
@@ -32,5 +51,23 @@ namespace MeetMind.Core.Enums
         Low,
         Medium,
         High
+    }
+
+    public enum QuizQuestionType
+    {
+        MultipleChoice,
+        TrueFalse,
+        ShortAnswer,
+        FillInTheBlank
+    }
+
+    public enum HighlightCategory
+    {
+        KeyConcept,
+        ExamTip,
+        Decision,
+        Warning,
+        Quote,
+        Definition
     }
 }

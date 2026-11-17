@@ -1,4 +1,11 @@
-import { TranscriptSegment, LectureRecord, QuizRecord, ActionItemRecord } from "./db";
+import {
+  TranscriptSegment,
+  LectureRecord,
+  QuizRecord,
+  ActionItemRecord,
+  FlashcardRecord,
+  MindMapRecord,
+} from "./db";
 
 export const LECTURE_AUDIO_PATH = "/app/applet/data/recordings/lecture_mohadara.m4a";
 export const LECTURE_DURATION_SECONDS = 1416; // 23 minutes 36 seconds
@@ -356,6 +363,8 @@ export function buildAuthenticLectureRecord(): {
   lecture: LectureRecord;
   quiz: QuizRecord;
   tasks: ActionItemRecord[];
+  flashcards: FlashcardRecord[];
+  mindMap: MindMapRecord;
 } {
   const now = new Date().toISOString();
   const lectureId = "lec_mohadara_tasamoh";
@@ -718,5 +727,181 @@ export function buildAuthenticLectureRecord(): {
     },
   ];
 
-  return { lecture, quiz, tasks };
+  const flashcards: FlashcardRecord[] = [
+    {
+      id: "fc_tasamoh_1",
+      deckId: "deck_tasamoh",
+      deckTitle: "فقه التسامح وبناء الذات",
+      lectureId,
+      front: "ما هو الأصل في طبيعة الدنيا والمعادلات الحياتية وفق ما ورد في المحاضرة؟",
+      back: "الأصل في الدنيا أنها دار ابتلاء وليست دار جزاء. قد يفعل الإنسان خيراً ويواجه شراً لأن العدل المطلق مكانه الآخرة.",
+      mastered: false,
+      reviewCount: 0,
+      createdAt: now,
+    },
+    {
+      id: "fc_tasamoh_2",
+      deckId: "deck_tasamoh",
+      deckTitle: "فقه التسامح وبناء الذات",
+      lectureId,
+      front:
+        "كيف وجهت الآية الكريمة (إِنَّ السَّاعَةَ لَآتِيَةٌ فَاصْفَحِ الصَّفْحَ الْجَمِيلَ) سلوك التسامح؟",
+      back: "ربطت الآية التسامح بالاستعداد للآخرة؛ فالصفح الجميل ينبع من إدراك العبد لحاجته لعفو الله ومغفرته في الدار الآخرة وليس من انتظار منفعة دنيوية.",
+      mastered: false,
+      reviewCount: 0,
+      createdAt: now,
+    },
+    {
+      id: "fc_tasamoh_3",
+      deckId: "deck_tasamoh",
+      deckTitle: "فقه التسامح وبناء الذات",
+      lectureId,
+      front: "ما دلالة حديث التاجر الذي كان يقول لغلمانه: (يسروا على الموسر وتجاوزوا عن المعسر)؟",
+      back: "الجزاء من جنس العمل عند الله تعالى؛ فمن تجاوز عن عباد الله تجاوز الله عنه وغفر له ودخل الجنة مقابلة لما كان يقدمه من يسر وتجاوز.",
+      mastered: false,
+      reviewCount: 0,
+      createdAt: now,
+    },
+    {
+      id: "fc_tasamoh_4",
+      deckId: "deck_tasamoh",
+      deckTitle: "فقه التسامح وبناء الذات",
+      lectureId,
+      front: "ما هي القاعدة النفسية بين العاطفة والإدراك أثناء الخلافات والغضب؟",
+      back: "عندما تشتعل العاطفة بنسبة 100% ينخفض الإدراك والوعي إلى الصفر؛ لذا يجب التوقف والتريث لتفريغ العاطفة قبل اتخاذ أي قرار أو حكم.",
+      mastered: false,
+      reviewCount: 0,
+      createdAt: now,
+    },
+    {
+      id: "fc_tasamoh_5",
+      deckId: "deck_tasamoh",
+      deckTitle: "فقه التسامح وبناء الذات",
+      lectureId,
+      front: "كيف نفرق في التعامل بين علاقات الاختيار وعلاقات الاضطرار؟",
+      back: "علاقات الاختيار (كالأصدقاء والمعارف) نضع لها حدوداً واضحة، بينما علاقات الاضطرار (كالوالدين والأقارب والعمل) تتطلب التغافل والابتلاع وسعة الصدر لحفظ النسيج.",
+      mastered: false,
+      reviewCount: 0,
+      createdAt: now,
+    },
+    {
+      id: "fc_tasamoh_6",
+      deckId: "deck_tasamoh",
+      deckTitle: "فقه التسامح وبناء الذات",
+      lectureId,
+      front: "لماذا قالت العرب: (قتل الحزن ولم يقتل الغضب)؟",
+      back: "لأن الغضب ينفث ويعبر عنه للخارج، بينما الحزن يكتم للداخل وإذا استمر تعفن وتحول إلى حقد دفين وأمراض نفسية وجسدية.",
+      mastered: false,
+      reviewCount: 0,
+      createdAt: now,
+    },
+    {
+      id: "fc_tasamoh_7",
+      deckId: "deck_tasamoh",
+      deckTitle: "فقه التسامح وبناء الذات",
+      lectureId,
+      front: "ما معنى التخلي عن ثوب الضحية وتحمل المسؤولية في بناء الذات؟",
+      back: "التوقف عن لوم الظروف والآخرين، والتسليم بأنك صاحب القرار في طريقة استجابتك وتوجيه مستقبلك بعد أي أزمة أو موقف صعب.",
+      mastered: false,
+      reviewCount: 0,
+      createdAt: now,
+    },
+  ];
+
+  const mindMap: MindMapRecord = {
+    id: "mm_tasamoh_main",
+    title: "خريطة فقه التسامح وبناء الذات",
+    lectureId,
+    rootNode: {
+      id: "root_tasamoh",
+      label: "فقه التسامح وبناء الذات بين الدنيا والآخرة",
+      description: "المحاور النفسية والفكرية والشرعية لإدارة الخلافات وتزكية النفس",
+      children: [
+        {
+          id: "node_beliefs",
+          label: "1. المنطلقات العقدية والفكرية",
+          description: "تصحيح نظرة الإنسان للحياة وتوقعاته من الناس",
+          children: [
+            {
+              id: "node_b1",
+              label: "الدنيا دار ابتلاء لا دار جزاء",
+              description: "المعادلات الدنيوية ليست عادلة بالضرورة والعدل التام محفوظ في الآخرة.",
+            },
+            {
+              id: "node_b2",
+              label: "حتمية الآخرة والصفح الجميل",
+              description:
+                "قوله تعالى (إِنَّ السَّاعَةَ لَآتِيَةٌ فَاصْفَحِ الصَّفْحَ الْجَمِيلَ).",
+            },
+            {
+              id: "node_b3",
+              label: "الجزاء من جنس العمل",
+              description: "حديث التاجر والتجاوز عن المعسرين لنيل عفو الله ورحمته.",
+            },
+          ],
+        },
+        {
+          id: "node_models",
+          label: "2. النماذج والمواقف التربوية",
+          description: "شواهد عملية على علو الهمة وضبط النفس",
+          children: [
+            {
+              id: "node_m1",
+              label: "موقف الشيخ ابن باز (النظر من علٍ)",
+              description: "النظر إلى عظمة الخالق سبحانه وليس صغر الخطوة الواحدة.",
+            },
+            {
+              id: "node_m2",
+              label: "اختبار الثبات وقيمة الصدق",
+              description:
+                "الصدق قيمة مبدئية يختبر الله بها المؤمن حتى وإن بدا في الظاهر عدم منجاته آنياً.",
+            },
+          ],
+        },
+        {
+          id: "node_psychology",
+          label: "3. الآليات النفسية وإدارة الانفعالات",
+          description: "قوانين السلوك البشري والتعامل مع المشاعر",
+          children: [
+            {
+              id: "node_p1",
+              label: "معادلة العاطفة والإدراك",
+              description:
+                "حين تشتعل العاطفة 100% يصبح الإدراك 0%، والتريث شرط اتخاذ القرار السليم.",
+            },
+            {
+              id: "node_p2",
+              label: "الفرق بين الغضب والحزن",
+              description: "تفريغ الغضب بالتي هي أحسن والوقاية من كبت الحزن وتحوله لحقد دفين.",
+            },
+            {
+              id: "node_p3",
+              label: "خلع ثوب الضحية",
+              description: "التحول من الشكوى والاستسلام إلى صناعة الاستجابة وتحديد المستقبل.",
+            },
+          ],
+        },
+        {
+          id: "node_practices",
+          label: "4. التطبيقات والضوابط العملية",
+          description: "قواعد السلوك اليومي والعلاقات",
+          children: [
+            {
+              id: "node_pr1",
+              label: "علاقات الاختيار مقابل الاضطرار",
+              description: "وضع الحدود الحازمة للأولى، والتغافل والتجاوز لحفظ الثانية.",
+            },
+            {
+              id: "node_pr2",
+              label: "الصفح الجميل",
+              description: "عفو حقيقي بلا منّ ولا أذى ولا تقريع ولا استدعاء للماضي.",
+            },
+          ],
+        },
+      ],
+    },
+    createdAt: now,
+  };
+
+  return { lecture, quiz, tasks, flashcards, mindMap };
 }

@@ -55,10 +55,19 @@ namespace MeetMind.Core.Entities
 
         public string? StoragePath { get; set; }
         public string? OriginalFileName { get; set; }
+        public string? MediaMimeType { get; set; }
+        public long? FileSizeBytes { get; set; }
+        public string Language { get; set; } = "auto";
+        public string? FullTranscriptText { get; set; }
         public string? Summary { get; set; }
+        public string? DetailedSummary { get; set; }
+        public string? DecisionsJson { get; set; }
 
         public ICollection<TranscriptSegment> TranscriptSegments { get; set; } = new List<TranscriptSegment>();
         public ICollection<ActionItem> ActionItems { get; set; } = new List<ActionItem>();
+        public ICollection<Topic> Topics { get; set; } = new List<Topic>();
+        public ICollection<Keyword> Keywords { get; set; } = new List<Keyword>();
+        public ICollection<Highlight> Highlights { get; set; } = new List<Highlight>();
 
         public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
         public DateTime UpdatedAtUtc { get; set; } = DateTime.UtcNow;
@@ -79,11 +88,20 @@ namespace MeetMind.Core.Entities
 
         public string? StoragePath { get; set; }
         public string? OriginalFileName { get; set; }
+        public string? MediaMimeType { get; set; }
+        public long? FileSizeBytes { get; set; }
+        public string Language { get; set; } = "auto";
+        public string? FullTranscriptText { get; set; }
         public string? StudyNotes { get; set; }
+        public string? DetailedSummary { get; set; }
 
         public ICollection<TranscriptSegment> TranscriptSegments { get; set; } = new List<TranscriptSegment>();
+        public ICollection<ActionItem> ActionItems { get; set; } = new List<ActionItem>();
         public ICollection<Quiz> Quizzes { get; set; } = new List<Quiz>();
         public ICollection<Flashcard> Flashcards { get; set; } = new List<Flashcard>();
+        public ICollection<Topic> Topics { get; set; } = new List<Topic>();
+        public ICollection<Keyword> Keywords { get; set; } = new List<Keyword>();
+        public ICollection<Highlight> Highlights { get; set; } = new List<Highlight>();
 
         public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
         public DateTime UpdatedAtUtc { get; set; } = DateTime.UtcNow;
@@ -101,6 +119,54 @@ namespace MeetMind.Core.Entities
         public double StartTimeSeconds { get; set; }
         public double EndTimeSeconds { get; set; }
         public string Text { get; set; } = string.Empty;
+        public double Confidence { get; set; } = 0.92;
+        public bool IsPartial { get; set; } = false;
+        public int ChunkIndex { get; set; } = 0;
+        public string Language { get; set; } = "auto";
+    }
+
+    public class Topic
+    {
+        public Guid Id { get; set; } = Guid.NewGuid();
+        public Guid? MeetingId { get; set; }
+        public Meeting? Meeting { get; set; }
+        public Guid? LectureId { get; set; }
+        public Lecture? Lecture { get; set; }
+
+        public string Name { get; set; } = string.Empty;
+        public string? Summary { get; set; }
+        public double StartTimeSeconds { get; set; }
+        public double EndTimeSeconds { get; set; }
+    }
+
+    public class Keyword
+    {
+        public Guid Id { get; set; } = Guid.NewGuid();
+        public Guid? MeetingId { get; set; }
+        public Meeting? Meeting { get; set; }
+        public Guid? LectureId { get; set; }
+        public Lecture? Lecture { get; set; }
+
+        public string Term { get; set; } = string.Empty;
+        public int Frequency { get; set; } = 1;
+        public double ImportanceScore { get; set; } = 0.5;
+        public string? SegmentIdsJson { get; set; }
+    }
+
+    public class Highlight
+    {
+        public Guid Id { get; set; } = Guid.NewGuid();
+        public Guid? MeetingId { get; set; }
+        public Meeting? Meeting { get; set; }
+        public Guid? LectureId { get; set; }
+        public Lecture? Lecture { get; set; }
+
+        public string Quote { get; set; } = string.Empty;
+        public string? Context { get; set; }
+        public string? Speaker { get; set; }
+        public string? TimestampText { get; set; }
+        public HighlightCategory Category { get; set; } = HighlightCategory.KeyConcept;
+        public TaskPriority Priority { get; set; } = TaskPriority.Medium;
     }
 
     public class ActionItem
@@ -110,10 +176,13 @@ namespace MeetMind.Core.Entities
         public Meeting? Meeting { get; set; }
         public Guid? LectureId { get; set; }
         public Lecture? Lecture { get; set; }
+        public Guid UserId { get; set; }
 
         public string Title { get; set; } = string.Empty;
         public string? OwnerName { get; set; }
         public DateTime? DueDateUtc { get; set; }
+        public string? DeadlineText { get; set; } = "Deadline not specified.";
+        public string? SourceTimestamp { get; set; }
         public TaskPriority Priority { get; set; } = TaskPriority.Medium;
         public bool Completed { get; set; } = false;
         public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
@@ -124,6 +193,8 @@ namespace MeetMind.Core.Entities
         public Guid Id { get; set; } = Guid.NewGuid();
         public Guid? LectureId { get; set; }
         public Lecture? Lecture { get; set; }
+        public Guid? MeetingId { get; set; }
+        public Guid UserId { get; set; }
         public string Title { get; set; } = string.Empty;
         public string? CourseCode { get; set; }
         public int AttemptsCount { get; set; } = 0;
@@ -131,6 +202,7 @@ namespace MeetMind.Core.Entities
         public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
 
         public ICollection<QuizQuestion> Questions { get; set; } = new List<QuizQuestion>();
+        public ICollection<QuizAttempt> Attempts { get; set; } = new List<QuizAttempt>();
     }
 
     public class QuizQuestion
@@ -139,9 +211,26 @@ namespace MeetMind.Core.Entities
         public Guid QuizId { get; set; }
         public Quiz Quiz { get; set; } = null!;
         public string QuestionText { get; set; } = string.Empty;
-        public string OptionsJson { get; set; } = "[]"; // Serialized string[]
+        public QuizQuestionType QuestionType { get; set; } = QuizQuestionType.MultipleChoice;
+        public string OptionsJson { get; set; } = "[]";
         public int CorrectOptionIndex { get; set; }
+        public string? CorrectAnswerText { get; set; }
         public string Explanation { get; set; } = string.Empty;
+        public string Difficulty { get; set; } = "medium";
+        public string? SourceTimestamp { get; set; }
+    }
+
+    public class QuizAttempt
+    {
+        public Guid Id { get; set; } = Guid.NewGuid();
+        public Guid QuizId { get; set; }
+        public Quiz Quiz { get; set; } = null!;
+        public Guid UserId { get; set; }
+        public int ScorePercent { get; set; }
+        public int CorrectCount { get; set; }
+        public int TotalQuestions { get; set; }
+        public string AnswersJson { get; set; } = "{}";
+        public DateTime SubmittedAtUtc { get; set; } = DateTime.UtcNow;
     }
 
     public class Flashcard
@@ -149,24 +238,49 @@ namespace MeetMind.Core.Entities
         public Guid Id { get; set; } = Guid.NewGuid();
         public Guid? LectureId { get; set; }
         public Lecture? Lecture { get; set; }
+        public Guid? MeetingId { get; set; }
+        public Guid UserId { get; set; }
         public string DeckTitle { get; set; } = string.Empty;
         public string Front { get; set; } = string.Empty;
         public string Back { get; set; } = string.Empty;
+        public string? TimestampRef { get; set; }
         public bool Mastered { get; set; } = false;
         public int ReviewCount { get; set; } = 0;
+        public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+    }
+
+    public class MindMap
+    {
+        public Guid Id { get; set; } = Guid.NewGuid();
+        public Guid? LectureId { get; set; }
+        public Guid? MeetingId { get; set; }
+        public Guid UserId { get; set; }
+        public string Title { get; set; } = string.Empty;
+        public string RootNodeJson { get; set; } = "{}";
         public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
     }
 
     public class ProcessingJob
     {
         public Guid Id { get; set; } = Guid.NewGuid();
+        public Guid UserId { get; set; }
+        public string CorrelationId { get; set; } = Guid.NewGuid().ToString("N");
+        public string? IdempotencyKey { get; set; }
         public string JobType { get; set; } = "Transcription";
         public JobStatus Status { get; set; } = JobStatus.Queued;
+        public string Stage { get; set; } = "Queued";
         public int ProgressPercent { get; set; } = 0;
         public string ResourceType { get; set; } = "meeting";
         public Guid ResourceId { get; set; }
         public string FileName { get; set; } = string.Empty;
+        public string? StoragePath { get; set; }
+        public string Language { get; set; } = "auto";
+        public int RetryCount { get; set; } = 0;
+        public int MaxRetries { get; set; } = 2;
+        public JobFailureCategory FailureCategory { get; set; } = JobFailureCategory.None;
         public string? ErrorMessage { get; set; }
+        public DateTime? LastAttemptAtUtc { get; set; }
+        public DateTime? FailureTimestampUtc { get; set; }
         public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
         public DateTime UpdatedAtUtc { get; set; } = DateTime.UtcNow;
     }
@@ -186,11 +300,22 @@ namespace MeetMind.Core.Entities
     public class CalendarEvent
     {
         public Guid Id { get; set; } = Guid.NewGuid();
+        public Guid UserId { get; set; }
         public string Title { get; set; } = string.Empty;
         public DateTime EventDateUtc { get; set; }
         public string EventTime { get; set; } = string.Empty;
         public string Kind { get; set; } = "meeting";
         public Guid? ReferenceId { get; set; }
         public int AttendeesCount { get; set; } = 1;
+    }
+
+    public class AuditLog
+    {
+        public Guid Id { get; set; } = Guid.NewGuid();
+        public Guid UserId { get; set; }
+        public string Action { get; set; } = string.Empty;
+        public string Resource { get; set; } = string.Empty;
+        public string? MetadataJson { get; set; }
+        public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
     }
 }

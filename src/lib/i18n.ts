@@ -506,14 +506,32 @@ export const LANG_STORAGE_KEY = "meetmind-lang";
 
 interface I18nStore {
   language: LanguageCode;
+  hydrated: boolean;
+  hydrateLanguage: () => void;
   setLanguage: (lang: LanguageCode) => void;
   toggleLanguage: () => void;
 }
 
 export const useI18nStore = create<I18nStore>((set, get) => ({
-  language:
-    (typeof window !== "undefined" && (localStorage.getItem(LANG_STORAGE_KEY) as LanguageCode)) ||
-    "EN",
+  language: "EN",
+  hydrated: false,
+  hydrateLanguage: () => {
+    try {
+      if (typeof window === "undefined") return;
+      const stored = localStorage.getItem(LANG_STORAGE_KEY) as LanguageCode | null;
+      if (stored === "AR" || stored === "EN") {
+        set({ language: stored, hydrated: true });
+        if (typeof document !== "undefined") {
+          document.documentElement.dir = stored === "AR" ? "rtl" : "ltr";
+          document.documentElement.lang = stored === "AR" ? "ar" : "en";
+        }
+      } else {
+        set({ hydrated: true });
+      }
+    } catch {
+      set({ hydrated: true });
+    }
+  },
   setLanguage: (language: LanguageCode) => {
     try {
       localStorage.setItem(LANG_STORAGE_KEY, language);

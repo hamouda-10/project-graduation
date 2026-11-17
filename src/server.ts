@@ -45,6 +45,9 @@ function isH3SwallowedErrorBody(body: string): boolean {
 }
 
 import { handleApiRequest } from "./server/routes";
+import { recoverInterruptedJobs } from "./server/jobs";
+
+recoverInterruptedJobs();
 
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {

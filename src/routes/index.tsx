@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { motion } from "framer-motion";
 import { Video, GraduationCap, Sparkles, Clock } from "lucide-react";
 
+import { lazy, Suspense } from "react";
 import { WelcomeCard } from "@/components/dashboard/welcome-card";
 import { StatCard } from "@/components/dashboard/stat-card";
 import { RecentMeetings } from "@/components/dashboard/recent-meetings";
@@ -12,11 +13,25 @@ import { ActivityWidget } from "@/components/dashboard/activity";
 import { TasksWidget } from "@/components/dashboard/tasks-widget";
 import { NotificationsWidget } from "@/components/dashboard/notifications-widget";
 import { CalendarWidget } from "@/components/dashboard/calendar-widget";
-import {
-  WeeklyAnalytics,
-  MeetingAnalytics,
-  LectureAnalytics,
-} from "@/components/dashboard/analytics-charts";
+
+// Lazy-load recharts-based components to keep initial bundle ultra-fast
+const WeeklyAnalytics = lazy(() =>
+  import("@/components/dashboard/analytics-charts").then((m) => ({ default: m.WeeklyAnalytics })),
+);
+const MeetingAnalytics = lazy(() =>
+  import("@/components/dashboard/analytics-charts").then((m) => ({ default: m.MeetingAnalytics })),
+);
+const LectureAnalytics = lazy(() =>
+  import("@/components/dashboard/analytics-charts").then((m) => ({ default: m.LectureAnalytics })),
+);
+
+function ChartSkeleton({ height = "h-56" }: { height?: string }) {
+  return (
+    <div
+      className={`w-full ${height} animate-pulse rounded-2xl border border-border/60 bg-card/60 p-5`}
+    />
+  );
+}
 
 import { useQuery } from "@tanstack/react-query";
 import { api, DashboardMetrics } from "@/lib/api-client";
@@ -98,7 +113,6 @@ function DashboardPage() {
         </div>
         <div className="space-y-4">
           <AIInsights />
-          <UpcomingList />
           <NotificationsWidget />
         </div>
       </motion.div>
@@ -109,7 +123,9 @@ function DashboardPage() {
         className="grid gap-4 lg:grid-cols-3"
       >
         <div className="lg:col-span-2">
-          <WeeklyAnalytics />
+          <Suspense fallback={<ChartSkeleton height="h-64" />}>
+            <WeeklyAnalytics />
+          </Suspense>
         </div>
         <TasksWidget />
       </motion.div>
@@ -119,8 +135,12 @@ function DashboardPage() {
         transition={{ ...fade.transition, delay: 0.2 }}
         className="grid gap-4 lg:grid-cols-3"
       >
-        <MeetingAnalytics />
-        <LectureAnalytics />
+        <Suspense fallback={<ChartSkeleton height="h-56" />}>
+          <MeetingAnalytics />
+        </Suspense>
+        <Suspense fallback={<ChartSkeleton height="h-56" />}>
+          <LectureAnalytics />
+        </Suspense>
         <ActivityWidget />
       </motion.div>
 
@@ -129,9 +149,8 @@ function DashboardPage() {
         transition={{ ...fade.transition, delay: 0.25 }}
         className="grid gap-4 lg:grid-cols-3"
       >
-        <div className="lg:col-span-2 grid gap-4 sm:grid-cols-2">
+        <div className="lg:col-span-2">
           <CalendarWidget />
-          <NotificationsWidget />
         </div>
         <UpcomingList />
       </motion.div>

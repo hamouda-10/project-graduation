@@ -48,7 +48,10 @@ export function NotificationsWidget() {
               <div className="min-w-0 flex-1">
                 <div className="flex items-center justify-between gap-2">
                   <div className="truncate text-sm font-medium text-foreground">{n.title}</div>
-                  <div className="shrink-0 text-[10px] font-mono text-muted-foreground">
+                  <div
+                    className="shrink-0 text-[10px] font-mono text-muted-foreground"
+                    suppressHydrationWarning
+                  >
                     {n.createdAt
                       ? new Date(n.createdAt).toLocaleTimeString("ar-EG", {
                           hour: "2-digit",

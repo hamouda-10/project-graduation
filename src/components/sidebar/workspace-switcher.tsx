@@ -22,30 +22,36 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
       <PopoverTrigger asChild>
         <button
           className={cn(
-            "flex w-full items-center gap-2.5 rounded-xl border border-border/60 bg-background/50 p-2 text-left text-sm shadow-elegant transition hover:bg-background/80",
+            "flex w-full items-center gap-2 rounded-xl border border-amber-500/35 bg-zinc-950/70 p-2 text-left text-sm shadow-sm transition-all duration-150 hover:border-amber-400/70 hover:bg-zinc-900/90 cursor-pointer",
             collapsed && "justify-center",
           )}
         >
-          <div className="grid h-7 w-7 shrink-0 place-items-center rounded-lg gradient-primary text-primary-foreground">
-            <Icon className="h-3.5 w-3.5" />
+          <div className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-amber-500/15 border border-amber-500/40 text-amber-300 font-bold">
+            <Icon className="h-3.5 w-3.5 text-amber-400" />
           </div>
           {!collapsed && (
             <>
               <div className="min-w-0 flex-1">
-                <div className="truncate text-[13px] font-medium leading-tight">{current.name}</div>
-                <div className="truncate text-[10.5px] uppercase tracking-wider text-muted-foreground">
+                <div className="truncate text-[12.5px] font-bold leading-tight text-foreground">
+                  {current.name}
+                </div>
+                <div className="truncate text-[10px] uppercase tracking-wider font-semibold text-amber-400/90">
                   {current.plan}
                 </div>
               </div>
-              <ChevronsUpDown className="h-3.5 w-3.5 text-muted-foreground" />
+              <ChevronsUpDown className="h-3.5 w-3.5 text-amber-400/80" />
             </>
           )}
         </button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-64 p-1.5">
-        <div className="px-2 py-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+      <PopoverContent
+        align="start"
+        className="w-52 p-1 bg-zinc-950/95 border-amber-500/40 backdrop-blur-xl"
+      >
+        <div className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-amber-400/90">
           Workspaces
         </div>
+        <div className="my-1 h-px bg-amber-500/20" />
         {WORKSPACES.map((w) => {
           const Ic = w.icon;
           const active = w.name === current.name;
@@ -56,16 +62,16 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
                 setWorkspace(w.name);
                 setOpen(false);
               }}
-              className="flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left text-sm hover:bg-accent"
+              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs font-medium hover:bg-amber-500/10 hover:text-amber-300 cursor-pointer"
             >
-              <div className="grid h-7 w-7 shrink-0 place-items-center rounded-lg gradient-primary text-primary-foreground">
-                <Ic className="h-3.5 w-3.5" />
+              <div className="grid h-6 w-6 shrink-0 place-items-center rounded bg-amber-500/15 text-amber-300">
+                <Ic className="h-3.5 w-3.5 text-amber-400" />
               </div>
               <div className="min-w-0 flex-1">
-                <div className="truncate font-medium">{w.name}</div>
-                <div className="truncate text-[11px] text-muted-foreground">{w.plan}</div>
+                <div className="truncate font-semibold text-xs">{w.name}</div>
+                <div className="truncate text-[10px] text-muted-foreground">{w.plan}</div>
               </div>
-              {active && <Check className="h-4 w-4 text-primary" />}
+              {active && <Check className="h-3.5 w-3.5 text-amber-400" />}
             </button>
           );
         })}

@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { api } from "@/lib/api-client";
+import { liveAudioTelemetry, resetLiveAudioTelemetry, useUIStore } from "@/stores/ui-store";
 
 export interface LiveTranscriptSegment {
   id: string;
@@ -15,6 +16,7 @@ export interface UseLiveTranscriptionOptions {
   title?: string;
   courseCode?: string;
   speakerName?: string;
+  language?: string; // "auto" | "ar-EG" | "ar-SA" | "en" | "mixed"
   chunkDurationMs?: number; // default: 3000ms
   onSegmentFinalized?: (segment: LiveTranscriptSegment) => void;
   onError?: (error: string) => void;
@@ -48,6 +50,7 @@ export function useLiveTranscription(options: UseLiveTranscriptionOptions = {}) 
     title = "تسجيل مباشر جديد",
     courseCode = "GEN 101",
     speakerName = "المتحدث 1",
+    language = "auto",
     chunkDurationMs = 3000,
     onSegmentFinalized,
     onError,
@@ -59,7 +62,13 @@ export function useLiveTranscription(options: UseLiveTranscriptionOptions = {}) 
   const [segments, setSegments] = useState<LiveTranscriptSegment[]>([]);
   const [interimText, setInterimText] = useState<string>("");
   const [detectedLanguage, setDetectedLanguage] = useState<string>(
-    "الكشف التلقائي (الترجمة للعربية)",
+    language === "en"
+      ? "English (US)"
+      : language === "ar-SA"
+        ? "العربية الفصحى"
+        : language === "ar-EG"
+          ? "العربية (مصر)"
+          : "الكشف التلقائي (Multi-Language)",
   );
   const [isProcessingChunk, setIsProcessingChunk] = useState(false);
   const [recordingId, setRecordingId] = useState<string | null>(null);
@@ -78,6 +87,8 @@ export function useLiveTranscription(options: UseLiveTranscriptionOptions = {}) 
   const speechRecognitionRef = useRef<SpeechRecognitionInstance | null>(null);
 
   const recordingIdRef = useRef<string | null>(null);
+  const isRecordingRef = useRef<boolean>(false);
+  const isPausedRef = useRef<boolean>(false);
   const segmentsRef = useRef<LiveTranscriptSegment[]>([]);
   const startTimeRef = useRef<number>(0);
   const chunkIndexRef = useRef<number>(0);
@@ -90,6 +101,18 @@ export function useLiveTranscription(options: UseLiveTranscriptionOptions = {}) 
   useEffect(() => {
     segmentsRef.current = segments;
   }, [segments]);
+
+  useEffect(() => {
+    setDetectedLanguage(
+      language === "en"
+        ? "English (US)"
+        : language === "ar-SA"
+          ? "العربية الفصحى"
+          : language === "ar-EG"
+            ? "العربية (مصر)"
+            : "الكشف التلقائي (Multi-Language)",
+    );
+  }, [language]);
 
   // Convert Blob to base64
   const blobToBase64 = (blob: Blob): Promise<string> => {
@@ -144,35 +167,26 @@ export function useLiveTranscription(options: UseLiveTranscriptionOptions = {}) 
           .join(" ");
 
         const sendRequest = async () => {
-          const res = await fetch("/api/v1/transcripts/live-chunk", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              recordingId: recordingIdRef.current,
-              audioBase64,
-              mimeType: chunkBlob.type || "audio/webm",
-              chunkIndex: chunkIndexRef.current++,
-              startTime: Math.round(startSec),
-              endTime: Math.max(Math.round(endSec), Math.round(startSec) + 1),
-              speaker: speakerName,
-              interimText: interimHint || interimText,
-              recentContext,
-            }),
+          const data = await api.sendLiveChunk({
+            recordingId: recordingIdRef.current,
+            audioBase64,
+            mimeType: chunkBlob.type || "audio/webm",
+            chunkIndex: chunkIndexRef.current++,
+            startTime: Math.round(startSec),
+            endTime: Math.max(Math.round(endSec), Math.round(startSec) + 1),
+            speaker: speakerName,
+            language,
+            interimText: interimHint || interimText,
+            recentContext,
           });
-
-          if (!res.ok) {
-            throw new Error(`HTTP ${res.status}`);
-          }
-
-          const data = await res.json();
-          const rawArabic = (data.arabicText || "").trim();
+          const rawTranscript = (data.text || data.arabicText || "").trim();
           const isPlaceholder =
-            !rawArabic ||
-            rawArabic === "[صمت]" ||
-            rawArabic.toLowerCase().includes("[silence]") ||
-            rawArabic.includes("جاري الاستماع") ||
-            rawArabic.includes("جاري تفريغ") ||
-            rawArabic.includes("جاري المعالجة");
+            !rawTranscript ||
+            rawTranscript === "[صمت]" ||
+            rawTranscript.toLowerCase().includes("[silence]") ||
+            rawTranscript.includes("جاري الاستماع") ||
+            rawTranscript.includes("جاري تفريغ") ||
+            rawTranscript.includes("جاري المعالجة");
 
           if (!isPlaceholder) {
             const newSeg: LiveTranscriptSegment = {
@@ -180,7 +194,7 @@ export function useLiveTranscription(options: UseLiveTranscriptionOptions = {}) 
               speaker: data.speaker || speakerName,
               startTime: data.startTime,
               endTime: data.endTime,
-              text: rawArabic,
+              text: rawTranscript,
               isFinal: true,
             };
 
@@ -221,10 +235,10 @@ export function useLiveTranscription(options: UseLiveTranscriptionOptions = {}) 
         setIsProcessingChunk(false);
       }
     },
-    [interimText, onSegmentFinalized, persistSegmentSafely, speakerName],
+    [interimText, language, onSegmentFinalized, persistSegmentSafely, speakerName],
   );
 
-  // Start real-time audio visualization
+  // Start real-time audio visualization via Web Audio API AnalyserNode
   const startAudioVisualizer = (stream: MediaStream) => {
     try {
       const AudioCtx =
@@ -235,26 +249,56 @@ export function useLiveTranscription(options: UseLiveTranscriptionOptions = {}) 
 
       const source = audioCtx.createMediaStreamSource(stream);
       const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 32;
-      analyser.smoothingTimeConstant = 0.8;
+      analyser.fftSize = 128; // 64 frequency bins
+      analyser.smoothingTimeConstant = 0.82;
       source.connect(analyser);
       analyserRef.current = analyser;
 
-      const bufferLength = analyser.frequencyBinCount;
-      const dataArray = new Uint8Array(bufferLength);
+      const bufferLength = analyser.frequencyBinCount; // 64
+      const freqArray = new Uint8Array(bufferLength);
+      const timeArray = new Uint8Array(bufferLength);
+      let lastReactUpdate = 0;
 
       const updateMeter = () => {
         if (!analyserRef.current) return;
-        analyserRef.current.getByteFrequencyData(dataArray);
+        analyserRef.current.getByteFrequencyData(freqArray);
+        analyserRef.current.getByteTimeDomainData(timeArray);
 
-        // Normalize 8 frequency bars
-        const step = Math.floor(bufferLength / 8);
-        const bars: number[] = [];
-        for (let i = 0; i < 8; i++) {
-          const val = dataArray[i * step] || 0;
-          bars.push(Math.max(0.12, Math.min(1.0, val / 255)));
+        let sumSq = 0;
+        let peakVal = 0;
+
+        // Populate 32 frequency bands and 64 time-domain samples in shared telemetry (zero React re-renders)
+        for (let i = 0; i < 32; i++) {
+          const v = (freqArray[i] || 0) / 255;
+          liveAudioTelemetry.bands[i] = v;
+          if (v > peakVal) peakVal = v;
         }
-        setAudioLevels(bars);
+
+        for (let i = 0; i < bufferLength; i++) {
+          const sample = ((timeArray[i] || 128) - 128) / 128;
+          liveAudioTelemetry.waveform[i] = sample;
+          sumSq += sample * sample;
+        }
+
+        const rms = Math.min(1, Math.sqrt(sumSq / bufferLength) * 3.2);
+        liveAudioTelemetry.active = true;
+        liveAudioTelemetry.rms = rms;
+        liveAudioTelemetry.peak = peakVal;
+        liveAudioTelemetry.updatedAt = performance.now();
+
+        // Throttle React state update for modal mini-bars to ~12fps to eliminate UI lag
+        const now = performance.now();
+        if (now - lastReactUpdate > 85) {
+          lastReactUpdate = now;
+          const step = Math.floor(bufferLength / 8);
+          const bars: number[] = [];
+          for (let i = 0; i < 8; i++) {
+            const val = freqArray[i * step] || 0;
+            bars.push(Math.max(0.12, Math.min(1.0, val / 255)));
+          }
+          setAudioLevels(bars);
+        }
+
         animationFrameRef.current = requestAnimationFrame(updateMeter);
       };
 
@@ -277,7 +321,7 @@ export function useLiveTranscription(options: UseLiveTranscriptionOptions = {}) 
       const recognizer = new SpeechRecognitionClass();
       recognizer.continuous = true;
       recognizer.interimResults = true;
-      recognizer.lang = "ar-EG"; // Arabic / Egyptian colloquial & standard
+      recognizer.lang = language === "en" ? "en-US" : language === "ar-SA" ? "ar-SA" : "ar-EG";
 
       recognizer.onresult = (event: SpeechRecognitionEvent) => {
         let interim = "";
@@ -334,8 +378,8 @@ export function useLiveTranscription(options: UseLiveTranscriptionOptions = {}) 
       };
 
       recognizer.onend = () => {
-        // Auto restart if still recording
-        if (isRecording && speechRecognitionRef.current) {
+        // Auto restart if still actively recording and not paused
+        if (isRecordingRef.current && !isPausedRef.current && speechRecognitionRef.current) {
           try {
             recognizer.start();
           } catch {
@@ -426,17 +470,22 @@ export function useLiveTranscription(options: UseLiveTranscriptionOptions = {}) 
       mediaRecorder.start(1000); // collect in 1s slices
 
       setIsRecording(true);
+      isRecordingRef.current = true;
       setIsPaused(false);
+      isPausedRef.current = false;
       setElapsedSeconds(0);
+      useUIStore.getState().setAudioSystemState("Recording");
 
       // Second timer
       timerIntervalRef.current = setInterval(() => {
-        setElapsedSeconds((prev) => prev + 1);
+        if (!isPausedRef.current) {
+          setElapsedSeconds((prev) => prev + 1);
+        }
       }, 1000);
 
       // Periodic chunk dispatch
       chunkTimerRef.current = setInterval(() => {
-        if (currentChunkBlobsRef.current.length > 0) {
+        if (!isPausedRef.current && currentChunkBlobsRef.current.length > 0) {
           const chunkBlob = new Blob(currentChunkBlobsRef.current, {
             type: selectedMime || "audio/webm",
           });
@@ -448,6 +497,8 @@ export function useLiveTranscription(options: UseLiveTranscriptionOptions = {}) 
         }
       }, chunkDurationMs);
     } catch (err: unknown) {
+      isRecordingRef.current = false;
+      isPausedRef.current = false;
       const errMsg =
         err instanceof Error
           ? err.message
@@ -463,9 +514,80 @@ export function useLiveTranscription(options: UseLiveTranscriptionOptions = {}) 
     if (isPaused) {
       mediaRecorderRef.current.resume();
       setIsPaused(false);
+      isPausedRef.current = false;
     } else {
       mediaRecorderRef.current.pause();
       setIsPaused(true);
+      isPausedRef.current = true;
+    }
+  };
+
+  // Cancel & Discard Live Recording Session cleanly
+  const cancelRecording = async () => {
+    isRecordingRef.current = false;
+    isPausedRef.current = false;
+    setIsRecording(false);
+    setIsPaused(false);
+    resetLiveAudioTelemetry();
+    useUIStore.getState().setAudioSystemState("Ready", 0);
+
+    if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+    if (chunkTimerRef.current) clearInterval(chunkTimerRef.current);
+    if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+
+    if (speechRecognitionRef.current) {
+      try {
+        speechRecognitionRef.current.stop();
+      } catch {
+        // ignore
+      }
+      speechRecognitionRef.current = null;
+    }
+
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      try {
+        mediaRecorderRef.current.stop();
+      } catch {
+        // ignore
+      }
+    }
+
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current = null;
+    }
+
+    if (audioContextRef.current && audioContextRef.current.state !== "closed") {
+      audioContextRef.current.close().catch(() => {});
+      audioContextRef.current = null;
+    }
+
+    const activeId = recordingIdRef.current;
+    recordingIdRef.current = null;
+    setRecordingId(null);
+    currentChunkBlobsRef.current = [];
+    allBlobsRef.current = [];
+    segmentsRef.current = [];
+    setSegments([]);
+    setInterimText("");
+    setElapsedSeconds(0);
+
+    try {
+      sessionStorage.removeItem("meetmind_active_session");
+    } catch {
+      // ignore
+    }
+
+    if (activeId) {
+      try {
+        if (type === "meeting") {
+          await api.deleteMeeting(activeId);
+        } else {
+          await api.deleteLecture(activeId);
+        }
+      } catch {
+        // ignore if already removed
+      }
     }
   };
 
@@ -474,8 +596,12 @@ export function useLiveTranscription(options: UseLiveTranscriptionOptions = {}) 
     success: boolean;
     resourceId?: string;
   }> => {
+    isRecordingRef.current = false;
+    isPausedRef.current = false;
     setIsRecording(false);
     setIsPaused(false);
+    resetLiveAudioTelemetry();
+    useUIStore.getState().setAudioSystemState("Processing", 40);
 
     if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
     if (chunkTimerRef.current) clearInterval(chunkTimerRef.current);
@@ -567,6 +693,7 @@ export function useLiveTranscription(options: UseLiveTranscriptionOptions = {}) 
         type,
         title,
         courseCode,
+        language,
         segments: segmentsRef.current,
         durationSeconds: Math.max(1, elapsedSeconds),
         audioBase64,
@@ -579,11 +706,17 @@ export function useLiveTranscription(options: UseLiveTranscriptionOptions = {}) 
       }
 
       if (res.success && res.resourceId) {
+        useUIStore.getState().setAudioSystemState("Completed", 100);
+        setTimeout(() => {
+          useUIStore.getState().setAudioSystemState("Ready", 0);
+        }, 5000);
         return { success: true, resourceId: res.resourceId };
       }
+      useUIStore.getState().setAudioSystemState("Ready", 0);
       return { success: false };
     } catch (e) {
       console.error("Failed to finalize session:", e);
+      useUIStore.getState().setAudioSystemState("Ready", 0);
       return { success: false };
     } finally {
       setIsProcessingChunk(false);
@@ -593,6 +726,7 @@ export function useLiveTranscription(options: UseLiveTranscriptionOptions = {}) 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      resetLiveAudioTelemetry();
       if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
       if (chunkTimerRef.current) clearInterval(chunkTimerRef.current);
       if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
@@ -626,6 +760,7 @@ export function useLiveTranscription(options: UseLiveTranscriptionOptions = {}) 
     startRecording,
     togglePause,
     stopRecording,
+    cancelRecording,
     setSegments,
   };
 }

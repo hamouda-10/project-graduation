@@ -30,3 +30,10 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Runtime data & AI models
+data/recordings/*
+!data/recordings/.gitkeep
+services/ai_service/packages/
+services/ai_service/models/
+

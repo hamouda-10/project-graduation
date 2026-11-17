@@ -1,19 +1,84 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { db, MeetingRecord, LectureRecord, ActionItemRecord, UserRecord } from "./db";
+import {
+  db,
+  MeetingRecord,
+  LectureRecord,
+  ActionItemRecord,
+  UserRecord,
+  TranscriptSegment,
+} from "./db";
 import {
   answerGroundedQuestion,
+  extractHighlightsFromSegments,
+  extractKeywordsWithFrequency,
   generateAnalysisFromTranscript,
   transcribeAndTranslateAudioChunk,
   generateAiSummary,
   generateAiQuiz,
   generateAiLectureAnalysis,
+  generateAiFlashcards,
+  generateAiMindMap,
   askMeetMindAI,
 } from "./ai";
-import { createJob, processRecordingJob, retryJob } from "./jobs";
+import { cancelJob, createJob, processRecordingJob, retryJob, validateMediaFile } from "./jobs";
+import { subscribeSync, notifySync, getLatestSyncEvent } from "./sync";
+import { matchesArabicQuery } from "../lib/arabic";
+
+const escapeHtml = (unsafe: string) =>
+  (unsafe || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+
+function isUserAdmin(user: UserRecord | null): boolean {
+  return !user || user.role === "admin";
+}
 
 const RECORDINGS_DIR = path.resolve(process.cwd(), "data", "recordings");
+
+function getMimeTypeFromExt(ext: string): string {
+  switch (ext) {
+    case ".mp3":
+      return "audio/mpeg";
+    case ".wav":
+      return "audio/wav";
+    case ".m4a":
+    case ".aac":
+      return "audio/mp4";
+    case ".ogg":
+    case ".opus":
+      return "audio/ogg";
+    case ".flac":
+      return "audio/flac";
+    case ".mp4":
+      return "video/mp4";
+    case ".mov":
+      return "video/quicktime";
+    case ".webm":
+      return "audio/webm";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+function formatVttTime(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  const ms = Math.floor((seconds % 1) * 1000);
+  return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}.${ms.toString().padStart(3, "0")}`;
+}
+
+function formatSrtTime(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  const ms = Math.floor((seconds % 1) * 1000);
+  return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")},${ms.toString().padStart(3, "0")}`;
+}
 
 function findRecordingFile(
   id: string,
@@ -24,18 +89,10 @@ function findRecordingFile(
 
   if (item?.recordingPath && fs.existsSync(item.recordingPath)) {
     const ext = path.extname(item.recordingPath).toLowerCase();
-    const mime =
-      ext === ".mp3"
-        ? "audio/mpeg"
-        : ext === ".wav"
-          ? "audio/wav"
-          : ext === ".m4a"
-            ? "audio/mp4"
-            : "audio/webm";
     return {
       filePath: item.recordingPath,
       fileName: item.recordingFileName || path.basename(item.recordingPath),
-      mimeType: mime,
+      mimeType: getMimeTypeFromExt(ext),
     };
   }
 
@@ -45,18 +102,10 @@ function findRecordingFile(
     if (matched) {
       const fullPath = path.join(RECORDINGS_DIR, matched);
       const ext = path.extname(matched).toLowerCase();
-      const mime =
-        ext === ".mp3"
-          ? "audio/mpeg"
-          : ext === ".wav"
-            ? "audio/wav"
-            : ext === ".m4a"
-              ? "audio/mp4"
-              : "audio/webm";
       return {
         filePath: fullPath,
         fileName: matched,
-        mimeType: mime,
+        mimeType: getMimeTypeFromExt(ext),
       };
     }
   }
@@ -100,6 +149,52 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
   const method = req.method;
 
   try {
+    // ----------------------------------------------------
+    // REAL-TIME SYNCHRONIZATION (SSE & POLLING STATUS)
+    // ----------------------------------------------------
+    if (pathname === "/api/v1/sync/status" && method === "GET") {
+      return Response.json(getLatestSyncEvent());
+    }
+
+    if (pathname === "/api/v1/sync/events" && method === "GET") {
+      const stream = new ReadableStream({
+        start(controller) {
+          const encoder = new TextEncoder();
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(getLatestSyncEvent())}\n\n`));
+
+          const unsubscribe = subscribeSync((event) => {
+            try {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+            } catch {
+              unsubscribe();
+            }
+          });
+
+          const heartbeat = setInterval(() => {
+            try {
+              controller.enqueue(encoder.encode(": keepalive\n\n"));
+            } catch {
+              clearInterval(heartbeat);
+              unsubscribe();
+            }
+          }, 20000);
+
+          req.signal.addEventListener("abort", () => {
+            clearInterval(heartbeat);
+            unsubscribe();
+          });
+        },
+      });
+
+      return new Response(stream, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache, no-transform",
+          Connection: "keep-alive",
+        },
+      });
+    }
+
     // ----------------------------------------------------
     // AUTHENTICATION
     // ----------------------------------------------------
@@ -214,16 +309,36 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
     // DASHBOARD
     // ----------------------------------------------------
     if (pathname === "/api/v1/dashboard/metrics" && method === "GET") {
-      const meetings = db.get("meetings");
-      const lectures = db.get("lectures");
-      const tasks = db.get("actionItems");
-      const jobs = db.get("jobs");
-      const quizzes = db.get("quizzes");
+      const user = getAuthUser(req);
+      const admin = isUserAdmin(user);
+      const meetings = admin
+        ? db.get("meetings")
+        : db.get("meetings").filter((m) => m.hostId === user?.id);
+      const lectures = admin
+        ? db.get("lectures")
+        : db.get("lectures").filter((l) => l.instructorId === user?.id);
+      const resourceIds = new Set([...meetings.map((m) => m.id), ...lectures.map((l) => l.id)]);
+      const tasks = admin
+        ? db.get("actionItems")
+        : db
+            .get("actionItems")
+            .filter(
+              (t) => t.userId === user?.id || resourceIds.has(t.meetingId || t.lectureId || ""),
+            );
+      const jobs = admin ? db.get("jobs") : db.get("jobs").filter((j) => j.userId === user?.id);
+      const quizzes = admin
+        ? db.get("quizzes")
+        : db.get("quizzes").filter((q) => resourceIds.has(q.lectureId || q.meetingId || ""));
 
       const completedTasks = tasks.filter((t) => t.completed).length;
       const pendingTasks = tasks.filter((t) => !t.completed).length;
       const processingJobs = jobs.filter(
-        (j) => j.status === "Queued" || j.status === "Transcribing" || j.status === "Analyzing",
+        (j) =>
+          j.status === "Queued" ||
+          j.status === "Validating" ||
+          j.status === "ExtractingAudio" ||
+          j.status === "Transcribing" ||
+          j.status === "Analyzing",
       ).length;
 
       const totalAudioDurationSeconds =
@@ -243,23 +358,30 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
       const hoursSaved =
         totalAudioDurationSeconds > 0 ? Math.round((totalAudioDurationSeconds / 3600) * 3) : 0;
 
-      return Response.json({
-        totalMeetings: meetings.length,
-        totalLectures: lectures.length,
-        totalAudioDurationSeconds,
-        totalAudioHours: Math.round(totalAudioDurationSeconds / 3600),
-        totalTranscripts,
-        totalSummaries,
-        totalQuizzes,
-        totalQuizAttempts,
-        completedTasks,
-        pendingTasks,
-        processingJobs,
-        hoursSaved,
-        recentMeetings: meetings.slice(0, 4),
-        recentLectures: lectures.slice(0, 3),
-        tasks: tasks.slice(0, 5),
-      });
+      return Response.json(
+        {
+          totalMeetings: meetings.length,
+          totalLectures: lectures.length,
+          totalAudioDurationSeconds,
+          totalAudioHours: Math.round(totalAudioDurationSeconds / 3600),
+          totalTranscripts,
+          totalSummaries,
+          totalQuizzes,
+          totalQuizAttempts,
+          completedTasks,
+          pendingTasks,
+          processingJobs,
+          hoursSaved,
+          recentMeetings: meetings.slice(0, 4),
+          recentLectures: lectures.slice(0, 3),
+          tasks: tasks.slice(0, 5),
+        },
+        {
+          headers: {
+            "Cache-Control": "private, max-age=5, stale-while-revalidate=30",
+          },
+        },
+      );
     }
 
     if (pathname === "/api/v1/dashboard/trends" && method === "GET") {
@@ -312,7 +434,14 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
         { m: "W4", value: meetingCount },
       ];
 
-      return Response.json({ weekly, meetingTrend });
+      return Response.json(
+        { weekly, meetingTrend },
+        {
+          headers: {
+            "Cache-Control": "private, max-age=15, stale-while-revalidate=60",
+          },
+        },
+      );
     }
 
     if (pathname === "/api/v1/dashboard/activity" && method === "GET") {
@@ -346,74 +475,71 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
         });
       }
 
-      return Response.json(activities);
+      return Response.json(activities, {
+        headers: {
+          "Cache-Control": "private, max-age=10, stale-while-revalidate=30",
+        },
+      });
     }
 
     // ----------------------------------------------------
     // MEETINGS
     // ----------------------------------------------------
     if (pathname === "/api/v1/meetings" && method === "GET") {
-      return Response.json(db.get("meetings"));
+      const user = getAuthUser(req);
+      const allMeetings = db.get("meetings");
+      const scoped = isUserAdmin(user)
+        ? allMeetings
+        : allMeetings.filter((m) => m.hostId === user?.id);
+      return Response.json(scoped, {
+        headers: {
+          "Cache-Control": "private, max-age=5, stale-while-revalidate=15",
+        },
+      });
     }
 
     if (pathname === "/api/v1/meetings" && method === "POST") {
       const user = getAuthUser(req);
       const body = await req.json();
-      const { title, hostName, date, durationMinutes, summary, participantsCount } = body;
+      const { title, hostName, date, durationMinutes, participantsCount, segments } = body;
 
-      if (!title) {
+      if (!title || !String(title).trim()) {
         return Response.json({ error: "Meeting title is required" }, { status: 400 });
       }
 
       const id = `m_${Date.now()}`;
       const now = new Date().toISOString();
-      const durationSeconds = (durationMinutes || 45) * 60;
-
-      const sampleSegments = [
-        {
-          id: `seg_${id}_1`,
-          speaker: hostName || user?.name || "Host",
-          startTime: 0,
-          endTime: 30,
-          text: `Welcome to "${title}". We are conducting our scheduled session to align on priorities and review action items.`,
-        },
-        {
-          id: `seg_${id}_2`,
-          speaker: "Participant",
-          startTime: 31,
-          endTime: 65,
-          text: `All milestones for this sprint are on track. We are reviewing performance metrics and preparing next deployment deliverables.`,
-        },
-      ];
-
-      const analysis = generateAnalysisFromTranscript(title, sampleSegments, "meeting");
+      const validSegments: TranscriptSegment[] = Array.isArray(segments) ? segments : [];
+      const analysis =
+        validSegments.length > 0
+          ? generateAnalysisFromTranscript(String(title).trim(), validSegments, "meeting")
+          : null;
 
       const newMeeting: MeetingRecord = {
         id,
         workspaceId: "ws_default",
-        title,
-        hostName: hostName || user?.name || "Ava Chen",
+        title: String(title).trim(),
+        hostName: hostName || user?.name || "Organizer",
         hostId: user?.id || "usr_admin",
         date: date || now.split("T")[0],
-        durationSeconds,
-        participantsCount: participantsCount || 4,
-        status: "Completed",
-        summary: summary || analysis.summary,
-        keyPoints: analysis.keyPoints,
-        decisions: analysis.decisions,
-        topics: analysis.topics,
-        segments: sampleSegments,
+        durationSeconds: durationMinutes ? durationMinutes * 60 : 0,
+        participantsCount: participantsCount || 1,
+        status: validSegments.length > 0 ? "Completed" : "Queued",
+        summary: analysis?.summary,
+        keyPoints: analysis?.keyPoints || [],
+        decisions: analysis?.decisions || [],
+        topics: analysis?.topics || [],
+        segments: validSegments,
         createdAt: now,
         updatedAt: now,
       };
 
       db.update("meetings", (all) => [newMeeting, ...all]);
 
-      // Add calendar event
       db.update("calendarEvents", (events) => [
         {
           id: `ev_${id}`,
-          title,
+          title: newMeeting.title,
           date: newMeeting.date,
           time: "10:00 AM",
           kind: "meeting",
@@ -426,9 +552,64 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
       return Response.json(newMeeting, { status: 201 });
     }
 
+    if (pathname === "/api/v1/meetings/all" && method === "DELETE") {
+      const user = getAuthUser(req);
+      const admin = isUserAdmin(user);
+      const allMeetings = db.get("meetings") || [];
+      const targetMeetings = admin ? allMeetings : allMeetings.filter((m) => m.hostId === user?.id);
+      const ids = targetMeetings.map((m) => m.id);
+
+      for (const meeting of targetMeetings) {
+        if (meeting.recordingPath && fs.existsSync(meeting.recordingPath)) {
+          try {
+            fs.unlinkSync(meeting.recordingPath);
+          } catch {
+            /* ignore */
+          }
+        }
+        if (fs.existsSync(RECORDINGS_DIR)) {
+          const files = fs.readdirSync(RECORDINGS_DIR);
+          for (const f of files) {
+            if (f.includes(meeting.id)) {
+              try {
+                fs.unlinkSync(path.join(RECORDINGS_DIR, f));
+              } catch {
+                /* ignore */
+              }
+            }
+          }
+        }
+      }
+
+      db.update("deletedResourceIds", (list = []) => Array.from(new Set([...list, ...ids])));
+
+      const idSet = new Set(ids);
+      db.update("meetings", (list) => list.filter((m) => !idSet.has(m.id)));
+      db.update("actionItems", (items) => items.filter((t) => !idSet.has(t.meetingId || "")));
+      db.update("calendarEvents", (events) =>
+        events.filter((e) => !idSet.has(e.referenceId || "")),
+      );
+      db.update("quizzes", (quizzes) =>
+        quizzes.filter((q) => !idSet.has(q.meetingId || "") && !idSet.has(q.lectureId || "")),
+      );
+      db.update("quizAttempts", (attempts) =>
+        attempts.filter((a) => !idSet.has(a.lectureId || "")),
+      );
+      db.update("flashcards", (cards) => cards.filter((c) => !idSet.has(c.deckId || "")));
+      db.update("mindMaps", (maps) => maps.filter((m) => !idSet.has(m.meetingId || "")));
+      db.update("jobs", (jobs) => jobs.filter((j) => !idSet.has(j.resourceId || "")));
+      db.update("recordingSessions", (sessions) => sessions.filter((s) => !idSet.has(s.id)));
+
+      notifySync({ type: "MEETINGS_ALL_DELETED", count: ids.length });
+      return Response.json({ success: true, count: ids.length });
+    }
+
     if (pathname.startsWith("/api/v1/meetings/") && method === "GET") {
+      const user = getAuthUser(req);
       const id = pathname.replace("/api/v1/meetings/", "");
-      const meeting = db.get("meetings").find((m) => m.id === id);
+      const meeting = db
+        .get("meetings")
+        .find((m) => m.id === id && (isUserAdmin(user) || m.hostId === user?.id));
       if (!meeting) return Response.json({ error: "Meeting not found" }, { status: 404 });
       return Response.json(meeting);
     }
@@ -444,21 +625,36 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
             console.error("Error unlinking audio:", e);
           }
         }
-        const fallbackPath = path.join(RECORDINGS_DIR, `recording_${id}.webm`);
-        if (fs.existsSync(fallbackPath)) {
-          try {
-            fs.unlinkSync(fallbackPath);
-          } catch {
-            // ignore
+        if (fs.existsSync(RECORDINGS_DIR)) {
+          const files = fs.readdirSync(RECORDINGS_DIR);
+          for (const f of files) {
+            if (f.includes(id)) {
+              try {
+                fs.unlinkSync(path.join(RECORDINGS_DIR, f));
+              } catch {
+                /* ignore */
+              }
+            }
           }
         }
       }
+      // Record permanent deletion so it is never resurrected on restart
+      db.update("deletedResourceIds", (list = []) => (list.includes(id) ? list : [...list, id]));
+
+      // Cascading deletion
       db.update("meetings", (all) => all.filter((m) => m.id !== id));
       db.update("actionItems", (items) => items.filter((t) => t.meetingId !== id));
       db.update("calendarEvents", (events) => events.filter((e) => e.referenceId !== id));
       db.update("quizzes", (quizzes) =>
         quizzes.filter((q) => q.meetingId !== id && q.lectureId !== id),
       );
+      db.update("quizAttempts", (attempts) => attempts.filter((a) => a.lectureId !== id));
+      db.update("flashcards", (cards) => cards.filter((c) => c.deckId !== id));
+      db.update("mindMaps", (maps) => maps.filter((m) => m.meetingId !== id));
+      db.update("jobs", (jobs) => jobs.filter((j) => j.resourceId !== id));
+      db.update("recordingSessions", (sessions) => sessions.filter((s) => s.id !== id));
+
+      notifySync({ type: "MEETING_DELETED", id });
       return Response.json({ success: true, id });
     }
 
@@ -466,13 +662,22 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
     // LECTURES
     // ----------------------------------------------------
     if (pathname === "/api/v1/lectures" && method === "GET") {
-      return Response.json(db.get("lectures"));
+      const user = getAuthUser(req);
+      const allLectures = db.get("lectures");
+      const scoped = isUserAdmin(user)
+        ? allLectures
+        : allLectures.filter((l) => l.instructorId === user?.id);
+      return Response.json(scoped, {
+        headers: {
+          "Cache-Control": "private, max-age=5, stale-while-revalidate=15",
+        },
+      });
     }
 
     if (pathname === "/api/v1/lectures" && method === "POST") {
       const user = getAuthUser(req);
       const body = await req.json();
-      const { title, courseCode, instructorName, date, durationMinutes } = body;
+      const { title, courseCode, instructorName, date, durationMinutes, segments } = body;
 
       if (!title || !courseCode) {
         return Response.json({ error: "Title and Course Code are required" }, { status: 400 });
@@ -480,87 +685,38 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
 
       const id = `l_${Date.now()}`;
       const now = new Date().toISOString();
-      const durationSeconds = (durationMinutes || 60) * 60;
-
-      const sampleSegments = [
-        {
-          id: `seg_${id}_1`,
-          speaker: instructorName || "Professor",
-          startTime: 0,
-          endTime: 40,
-          text: `Welcome to ${courseCode}: ${title}. Today we dissect the core theoretical models and analyze critical system invariants.`,
-        },
-        {
-          id: `seg_${id}_2`,
-          speaker: instructorName || "Professor",
-          startTime: 41,
-          endTime: 95,
-          text: `Be sure to study these key concepts and failure recovery conditions carefully for your midterm examinations.`,
-        },
-      ];
-
-      const analysis = generateAnalysisFromTranscript(title, sampleSegments, "lecture", courseCode);
+      const validSegments: TranscriptSegment[] = Array.isArray(segments) ? segments : [];
+      const analysis =
+        validSegments.length > 0
+          ? generateAnalysisFromTranscript(
+              String(title).trim(),
+              validSegments,
+              "lecture",
+              courseCode,
+            )
+          : null;
 
       const newLecture: LectureRecord = {
         id,
         workspaceId: "ws_default",
-        title,
-        courseCode,
-        instructorName: instructorName || user?.name || "Prof. K. Nakamura",
-        instructorId: user?.id || "usr_priya",
+        title: String(title).trim(),
+        courseCode: String(courseCode).trim(),
+        instructorName: instructorName || user?.name || "Lecturer",
+        instructorId: user?.id || "usr_admin",
         date: date || now.split("T")[0],
-        durationSeconds,
-        status: "Completed",
-        studyNotes: analysis.lectureNotes,
-        keyConcepts: analysis.keyConcepts,
-        examHighlights: analysis.examHighlights,
-        topics: analysis.topics,
-        segments: sampleSegments,
+        durationSeconds: durationMinutes ? durationMinutes * 60 : 0,
+        status: validSegments.length > 0 ? "Completed" : "Queued",
+        studyNotes: analysis?.lectureNotes,
+        keyConcepts: analysis?.keyConcepts || [],
+        examHighlights: analysis?.examHighlights || [],
+        topics: analysis?.topics || [],
+        segments: validSegments,
         createdAt: now,
         updatedAt: now,
       };
 
       db.update("lectures", (all) => [newLecture, ...all]);
 
-      if (analysis.quiz) {
-        db.update("quizzes", (quizzes) => [
-          {
-            id: `quiz_${id}`,
-            lectureId: id,
-            title: analysis.quiz!.title,
-            courseCode,
-            questions: analysis.quiz!.questions.map((q, idx) => ({
-              id: `q_${id}_${idx + 1}`,
-              question: q.question,
-              options: q.options,
-              correctOptionIndex: q.correctOptionIndex,
-              explanation: q.explanation,
-            })),
-            attemptsCount: 0,
-            createdAt: now,
-          },
-          ...quizzes,
-        ]);
-      }
-
-      if (analysis.flashcards) {
-        db.update("flashcards", (cards) => [
-          ...cards,
-          ...analysis.flashcards!.map((fc, idx) => ({
-            id: `fc_${id}_${idx + 1}`,
-            deckId: `deck_${id}`,
-            deckTitle: `${courseCode} — ${title}`,
-            lectureId: id,
-            front: fc.front,
-            back: fc.back,
-            mastered: false,
-            reviewCount: 0,
-            createdAt: now,
-          })),
-        ]);
-      }
-
-      // Add calendar event
       db.update("calendarEvents", (events) => [
         {
           id: `ev_${id}`,
@@ -569,7 +725,7 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
           time: "11:00 AM",
           kind: "lecture",
           referenceId: id,
-          attendeesCount: 40,
+          attendeesCount: 1,
         },
         ...events,
       ]);
@@ -577,9 +733,64 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
       return Response.json(newLecture, { status: 201 });
     }
 
+    if (pathname === "/api/v1/lectures/all" && method === "DELETE") {
+      const user = getAuthUser(req);
+      const admin = isUserAdmin(user);
+      const allLectures = db.get("lectures") || [];
+      const targetLectures = admin
+        ? allLectures
+        : allLectures.filter((l) => l.instructorId === user?.id);
+      const ids = targetLectures.map((l) => l.id);
+
+      for (const lecture of targetLectures) {
+        if (lecture.recordingPath && fs.existsSync(lecture.recordingPath)) {
+          try {
+            fs.unlinkSync(lecture.recordingPath);
+          } catch {
+            /* ignore */
+          }
+        }
+        if (fs.existsSync(RECORDINGS_DIR)) {
+          const files = fs.readdirSync(RECORDINGS_DIR);
+          for (const f of files) {
+            if (f.includes(lecture.id)) {
+              try {
+                fs.unlinkSync(path.join(RECORDINGS_DIR, f));
+              } catch {
+                /* ignore */
+              }
+            }
+          }
+        }
+      }
+
+      db.update("deletedResourceIds", (list = []) => Array.from(new Set([...list, ...ids])));
+
+      const idSet = new Set(ids);
+      db.update("lectures", (list) => list.filter((l) => !idSet.has(l.id)));
+      db.update("quizzes", (quizzes) => quizzes.filter((q) => !idSet.has(q.lectureId || "")));
+      db.update("quizAttempts", (attempts) =>
+        attempts.filter((a) => !idSet.has(a.lectureId || "")),
+      );
+      db.update("actionItems", (items) => items.filter((a) => !idSet.has(a.lectureId || "")));
+      db.update("flashcards", (cards) => cards.filter((c) => !idSet.has(c.lectureId || "")));
+      db.update("mindMaps", (maps) => maps.filter((m) => !idSet.has(m.lectureId || "")));
+      db.update("calendarEvents", (events) =>
+        events.filter((e) => !idSet.has(e.referenceId || "")),
+      );
+      db.update("jobs", (jobs) => jobs.filter((j) => !idSet.has(j.resourceId || "")));
+      db.update("recordingSessions", (sessions) => sessions.filter((s) => !idSet.has(s.id)));
+
+      notifySync({ type: "LECTURES_ALL_DELETED", count: ids.length });
+      return Response.json({ success: true, count: ids.length });
+    }
+
     if (pathname.startsWith("/api/v1/lectures/") && method === "GET") {
+      const user = getAuthUser(req);
       const id = pathname.replace("/api/v1/lectures/", "");
-      const lecture = db.get("lectures").find((l) => l.id === id);
+      const lecture = db
+        .get("lectures")
+        .find((l) => l.id === id && (isUserAdmin(user) || l.instructorId === user?.id));
       if (!lecture) return Response.json({ error: "Lecture not found" }, { status: 404 });
       return Response.json(lecture);
     }
@@ -595,19 +806,34 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
             console.error("Error unlinking audio:", e);
           }
         }
-        const fallbackPath = path.join(RECORDINGS_DIR, `recording_${id}.webm`);
-        if (fs.existsSync(fallbackPath)) {
-          try {
-            fs.unlinkSync(fallbackPath);
-          } catch {
-            // ignore
+        if (fs.existsSync(RECORDINGS_DIR)) {
+          const files = fs.readdirSync(RECORDINGS_DIR);
+          for (const f of files) {
+            if (f.includes(id)) {
+              try {
+                fs.unlinkSync(path.join(RECORDINGS_DIR, f));
+              } catch {
+                /* ignore */
+              }
+            }
           }
         }
       }
+      // Record permanent deletion so it is never resurrected on restart
+      db.update("deletedResourceIds", (list = []) => (list.includes(id) ? list : [...list, id]));
+
+      // Cascading deletion across all tables
       db.update("lectures", (all) => all.filter((l) => l.id !== id));
       db.update("quizzes", (quizzes) => quizzes.filter((q) => q.lectureId !== id));
+      db.update("quizAttempts", (attempts) => attempts.filter((a) => a.lectureId !== id));
+      db.update("actionItems", (items) => items.filter((a) => a.lectureId !== id));
       db.update("flashcards", (cards) => cards.filter((c) => c.lectureId !== id));
+      db.update("mindMaps", (maps) => maps.filter((m) => m.lectureId !== id));
       db.update("calendarEvents", (events) => events.filter((e) => e.referenceId !== id));
+      db.update("jobs", (jobs) => jobs.filter((j) => j.resourceId !== id));
+      db.update("recordingSessions", (sessions) => sessions.filter((s) => s.id !== id));
+
+      notifySync({ type: "LECTURE_DELETED", id });
       return Response.json({ success: true, id });
     }
 
@@ -615,11 +841,15 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
     // RECORDINGS UPLOAD & TRANSCRIPTION PIPELINE
     // ----------------------------------------------------
     if (pathname === "/api/v1/recordings/upload" && method === "POST") {
+      const user = getAuthUser(req);
+      const headerIdemKey = req.headers.get("Idempotency-Key")?.trim();
       const contentType = req.headers.get("content-type") || "";
       let resourceType: "meeting" | "lecture" = "meeting";
       let title = "Audio Recording";
       let courseCode = "";
       let originalFilename = "recording.wav";
+      let language = "auto";
+      let idempotencyKey = headerIdemKey || "";
       let buffer: Buffer;
 
       if (contentType.includes("multipart/form-data")) {
@@ -630,9 +860,11 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
           (formData.get("title") as string) ||
           (file ? file.name.replace(/\.[^/.]+$/, "") : "New Recording");
         courseCode = (formData.get("courseCode") as string) || "";
+        language = (formData.get("language") as string) || "auto";
+        idempotencyKey = idempotencyKey || (formData.get("idempotencyKey") as string) || "";
 
         if (!file) {
-          return Response.json({ error: "Audio file is required" }, { status: 400 });
+          return Response.json({ error: "Audio or video file is required." }, { status: 400 });
         }
         originalFilename = file.name;
         const arrayBuffer = await file.arrayBuffer();
@@ -643,20 +875,66 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
         title = json.title || "Microphone Recording";
         courseCode = json.courseCode || "";
         originalFilename = json.fileName || "mic_recording.webm";
-        if (json.audioBase64) {
-          buffer = Buffer.from(json.audioBase64, "base64");
-        } else {
-          // create a 1-second dummy audio buffer if testing
-          buffer = Buffer.alloc(1024);
+        language = json.language || "auto";
+        idempotencyKey = idempotencyKey || json.idempotencyKey || "";
+        if (!json.audioBase64 || typeof json.audioBase64 !== "string") {
+          return Response.json(
+            { error: "Audio payload (audioBase64) is required." },
+            { status: 400 },
+          );
+        }
+        buffer = Buffer.from(json.audioBase64, "base64");
+      }
+
+      if (idempotencyKey) {
+        const existingJob = db
+          .get("jobs")
+          .find(
+            (j) =>
+              j.idempotencyKey === idempotencyKey &&
+              j.status !== "Failed" &&
+              j.status !== "Cancelled",
+          );
+        if (existingJob) {
+          return Response.json(
+            {
+              message: "Duplicate request matched existing job.",
+              jobId: existingJob.id,
+              resourceId: existingJob.resourceId,
+              resourceType: existingJob.resourceType,
+              status: existingJob.status,
+              deduplicated: true,
+            },
+            { status: 202 },
+          );
         }
       }
 
-      // Safe storage name
+      if (buffer.length <= 0) {
+        return Response.json({ error: "Uploaded file is empty." }, { status: 400 });
+      }
+
       const safeName = `${Date.now()}_${path.basename(originalFilename).replace(/[^a-zA-Z0-9._-]/g, "_")}`;
       const savedPath = path.join(RECORDINGS_DIR, safeName);
       fs.writeFileSync(savedPath, buffer);
 
-      // Create resource in DB with 'Processing' state
+      // Strict server-side FFprobe validation (reject empty/corrupted/unsupported/no-audio before queueing)
+      const probe = await validateMediaFile(savedPath, originalFilename);
+      if (!probe.valid) {
+        try {
+          if (fs.existsSync(savedPath)) fs.unlinkSync(savedPath);
+        } catch {
+          /* ignore */
+        }
+        return Response.json(
+          {
+            error: probe.error || "Invalid media file.",
+            category: probe.category || "MediaValidationError",
+          },
+          { status: 422 },
+        );
+      }
+
       const resourceId = resourceType === "meeting" ? `m_${Date.now()}` : `l_${Date.now()}`;
       const now = new Date().toISOString();
 
@@ -666,14 +944,16 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
             id: resourceId,
             workspaceId: "ws_default",
             title,
-            hostName: "You",
-            hostId: "usr_admin",
+            hostName: user?.name || "Organizer",
+            hostId: user?.id || "usr_admin",
             date: now.split("T")[0],
-            durationSeconds: 0,
+            durationSeconds: probe.durationSeconds,
             participantsCount: 1,
             status: "Processing",
+            language,
             recordingPath: savedPath,
             recordingFileName: originalFilename,
+            audioUrl: `/api/v1/recordings/audio/${resourceId}`,
             segments: [],
             createdAt: now,
             updatedAt: now,
@@ -687,13 +967,15 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
             workspaceId: "ws_default",
             title,
             courseCode: courseCode || "GEN 101",
-            instructorName: "Lecturer",
-            instructorId: "usr_priya",
+            instructorName: user?.name || "Lecturer",
+            instructorId: user?.id || "usr_admin",
             date: now.split("T")[0],
-            durationSeconds: 0,
+            durationSeconds: probe.durationSeconds,
             status: "Processing",
+            language,
             recordingPath: savedPath,
             recordingFileName: originalFilename,
+            audioUrl: `/api/v1/recordings/audio/${resourceId}`,
             segments: [],
             createdAt: now,
             updatedAt: now,
@@ -702,12 +984,20 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
         ]);
       }
 
-      // Create durable background job
-      const job = createJob(resourceType, resourceId, originalFilename, savedPath);
+      const job = createJob(resourceType, resourceId, originalFilename, savedPath, language, {
+        userId: user?.id || "usr_admin",
+        idempotencyKey: idempotencyKey || undefined,
+      });
 
-      // Launch async processing job (does not block HTTP response)
       setTimeout(() => {
-        processRecordingJob(job.id, resourceType, resourceId, savedPath, originalFilename);
+        void processRecordingJob(
+          job.id,
+          resourceType,
+          resourceId,
+          savedPath,
+          originalFilename,
+          language,
+        );
       }, 50);
 
       return Response.json(
@@ -716,8 +1006,120 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
           jobId: job.id,
           resourceId,
           resourceType,
+          durationSeconds: probe.durationSeconds,
           status: "Queued",
         },
+        { status: 202 },
+      );
+    }
+
+    if (pathname === "/api/v1/recordings/all" && method === "DELETE") {
+      const user = getAuthUser(req);
+      const admin = isUserAdmin(user);
+
+      const allMeetings = db.get("meetings") || [];
+      const targetMeetings = admin ? allMeetings : allMeetings.filter((m) => m.hostId === user?.id);
+      const allLectures = db.get("lectures") || [];
+      const targetLectures = admin
+        ? allLectures
+        : allLectures.filter((l) => l.instructorId === user?.id);
+
+      const ids = [...targetMeetings.map((m) => m.id), ...targetLectures.map((l) => l.id)];
+      const idSet = new Set(ids);
+
+      for (const item of [...targetMeetings, ...targetLectures]) {
+        if (item.recordingPath && fs.existsSync(item.recordingPath)) {
+          try {
+            fs.unlinkSync(item.recordingPath);
+          } catch {
+            /* ignore */
+          }
+        }
+        if (fs.existsSync(RECORDINGS_DIR)) {
+          for (const f of fs.readdirSync(RECORDINGS_DIR)) {
+            if (f.includes(item.id)) {
+              try {
+                fs.unlinkSync(path.join(RECORDINGS_DIR, f));
+              } catch {
+                /* ignore */
+              }
+            }
+          }
+        }
+      }
+
+      db.update("deletedResourceIds", (list = []) => Array.from(new Set([...list, ...ids])));
+      db.update("meetings", (list) => list.filter((m) => !idSet.has(m.id)));
+      db.update("lectures", (list) => list.filter((l) => !idSet.has(l.id)));
+      db.update("actionItems", (list) =>
+        list.filter((t) => !idSet.has(t.meetingId || "") && !idSet.has(t.lectureId || "")),
+      );
+      db.update("quizzes", (list) =>
+        list.filter((q) => !idSet.has(q.meetingId || "") && !idSet.has(q.lectureId || "")),
+      );
+      db.update("quizAttempts", (list) => list.filter((a) => !idSet.has(a.lectureId || "")));
+      db.update("flashcards", (list) =>
+        list.filter(
+          (c) => !idSet.has(c.lectureId || "") && !idSet.has(c.deckId.replace("deck_", "")),
+        ),
+      );
+      db.update("mindMaps", (list) =>
+        list.filter((m) => !idSet.has(m.meetingId || "") && !idSet.has(m.lectureId || "")),
+      );
+      db.update("calendarEvents", (list) => list.filter((e) => !idSet.has(e.referenceId || "")));
+      db.update("jobs", (list) => list.filter((j) => !idSet.has(j.resourceId)));
+      db.update("recordingSessions", (list) => list.filter((s) => !idSet.has(s.id)));
+
+      notifySync({ type: "RECORDINGS_ALL_DELETED", count: ids.length });
+      return Response.json({ success: true, deletedCount: ids.length });
+    }
+
+    if (
+      pathname.startsWith("/api/v1/recordings/") &&
+      pathname.endsWith("/reprocess") &&
+      method === "POST"
+    ) {
+      const user = getAuthUser(req);
+      const id = pathname.replace("/api/v1/recordings/", "").replace("/reprocess", "");
+      const meeting = db
+        .get("meetings")
+        .find((m) => m.id === id && (isUserAdmin(user) || m.hostId === user?.id));
+      const lecture = db
+        .get("lectures")
+        .find((l) => l.id === id && (isUserAdmin(user) || l.instructorId === user?.id));
+      const item = meeting || lecture;
+      if (!item || !item.recordingPath || !fs.existsSync(item.recordingPath)) {
+        return Response.json(
+          { error: "Original recording audio file not found on disk." },
+          { status: 404 },
+        );
+      }
+
+      const rType = meeting ? "meeting" : "lecture";
+      const job = createJob(
+        rType,
+        id,
+        item.recordingFileName || path.basename(item.recordingPath),
+        item.recordingPath,
+        item.language || "auto",
+        {
+          userId: user?.id || "usr_admin",
+        },
+      );
+
+      setTimeout(() => {
+        void processRecordingJob(
+          job.id,
+          rType,
+          id,
+          item.recordingPath!,
+          item.recordingFileName || item.title,
+          item.language || "auto",
+        );
+      }, 50);
+
+      return Response.json(
+        { success: true, jobId: job.id, resourceId: id, status: "Queued" },
         { status: 202 },
       );
     }
@@ -811,12 +1213,16 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
         },
       });
 
+      const asciiFallback =
+        fileInfo.fileName.replace(/[^\x20-\x7E]/g, "_").replace(/["\\]/g, "_") || `recording_${id}`;
+      const utf8Encoded = encodeURIComponent(fileInfo.fileName);
+
       return new Response(webStream, {
         status: 200,
         headers: {
           "Content-Length": String(stat.size),
           "Content-Type": fileInfo.mimeType,
-          "Content-Disposition": `attachment; filename="${fileInfo.fileName}"`,
+          "Content-Disposition": `attachment; filename="${asciiFallback}"; filename*=UTF-8''${utf8Encoded}`,
         },
       });
     }
@@ -825,7 +1231,10 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
     // JOBS
     // ----------------------------------------------------
     if (pathname === "/api/v1/jobs" && method === "GET") {
-      return Response.json(db.get("jobs"));
+      const user = getAuthUser(req);
+      const jobs = db.get("jobs");
+      const scoped = isUserAdmin(user) ? jobs : jobs.filter((j) => j.userId === user?.id);
+      return Response.json(scoped);
     }
 
     if (pathname.startsWith("/api/v1/jobs/") && pathname.endsWith("/retry") && method === "POST") {
@@ -839,9 +1248,23 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
       }
     }
 
+    if (pathname.startsWith("/api/v1/jobs/") && pathname.endsWith("/cancel") && method === "POST") {
+      const id = pathname.replace("/api/v1/jobs/", "").replace("/cancel", "");
+      try {
+        const cancelled = cancelJob(id);
+        return Response.json({ success: true, job: cancelled });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to cancel job";
+        return Response.json({ error: message }, { status: 400 });
+      }
+    }
+
     if (pathname.startsWith("/api/v1/jobs/") && method === "GET") {
+      const user = getAuthUser(req);
       const id = pathname.replace("/api/v1/jobs/", "");
-      const job = db.get("jobs").find((j) => j.id === id);
+      const job = db
+        .get("jobs")
+        .find((j) => j.id === id && (isUserAdmin(user) || !j.userId || j.userId === user?.id));
       if (!job) return Response.json({ error: "Job not found" }, { status: 404 });
       return Response.json(job);
     }
@@ -872,6 +1295,180 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
 
     if (
       pathname.startsWith("/api/v1/transcripts/") &&
+      pathname.endsWith("/captions") &&
+      method === "GET"
+    ) {
+      const id = pathname.replace("/api/v1/transcripts/", "").replace("/captions", "");
+      const format = url.searchParams.get("format") || "vtt";
+      const meeting = db.get("meetings").find((m) => m.id === id);
+      const lecture = db.get("lectures").find((l) => l.id === id);
+      const item = meeting || lecture;
+
+      if (!item) {
+        return Response.json({ error: "Transcript not found" }, { status: 404 });
+      }
+
+      const segments = item.segments || [];
+      const safeAsciiFilename = `transcript_${item.id}.${format}`;
+      const encodedUtf8Filename = encodeURIComponent(`${item.title}.${format}`);
+
+      if (format === "srt") {
+        let srtContent = "";
+        segments.forEach((seg, idx) => {
+          srtContent += `${idx + 1}\n`;
+          srtContent += `${formatSrtTime(seg.startTime)} --> ${formatSrtTime(seg.endTime)}\n`;
+          srtContent += `${seg.speaker ? `${seg.speaker}: ` : ""}${seg.text}\n\n`;
+        });
+        return new Response(srtContent, {
+          status: 200,
+          headers: {
+            "Content-Type": "text/plain; charset=utf-8",
+            "Content-Disposition": `attachment; filename="${safeAsciiFilename}"; filename*=UTF-8''${encodedUtf8Filename}`,
+          },
+        });
+      } else {
+        let vttContent = "WEBVTT - MeetMind AI Transcript Export\n\n";
+        segments.forEach((seg, idx) => {
+          vttContent += `${idx + 1}\n`;
+          vttContent += `${formatVttTime(seg.startTime)} --> ${formatVttTime(seg.endTime)}\n`;
+          vttContent += `${seg.speaker ? `${seg.speaker}: ` : ""}${seg.text}\n\n`;
+        });
+        return new Response(vttContent, {
+          status: 200,
+          headers: {
+            "Content-Type": "text/vtt; charset=utf-8",
+            "Content-Disposition": `attachment; filename="${safeAsciiFilename}"; filename*=UTF-8''${encodedUtf8Filename}`,
+          },
+        });
+      }
+    }
+
+    if (
+      pathname.startsWith("/api/v1/transcripts/") &&
+      pathname.endsWith("/speakers") &&
+      method === "PUT"
+    ) {
+      const id = pathname.replace("/api/v1/transcripts/", "").replace("/speakers", "");
+      const body = await req.json();
+      const rawMap = (body?.speakerMap || {}) as Record<string, string>;
+      const speakerMap: Record<string, string> = { ...rawMap };
+      if (body?.oldSpeaker && body?.newSpeaker) {
+        speakerMap[String(body.oldSpeaker)] = String(body.newSpeaker);
+      }
+
+      let updatedCount = 0;
+      const remapSegments = (segs: TranscriptSegment[]) =>
+        segs.map((s) => {
+          const nextName = speakerMap[s.speaker]?.trim();
+          if (nextName && nextName !== s.speaker) {
+            updatedCount++;
+            return { ...s, speaker: nextName };
+          }
+          return s;
+        });
+
+      const meeting = db.get("meetings").find((m) => m.id === id);
+      if (meeting) {
+        const nextSegs = remapSegments(meeting.segments || []);
+        const nextFullText = nextSegs.map((s) => `${s.speaker}: ${s.text}`).join("\n");
+        db.update("meetings", (list) =>
+          list.map((m) =>
+            m.id === id
+              ? {
+                  ...m,
+                  segments: nextSegs,
+                  fullText: nextFullText,
+                  updatedAt: new Date().toISOString(),
+                }
+              : m,
+          ),
+        );
+        return Response.json({ success: true, updatedSegments: updatedCount, segments: nextSegs });
+      }
+
+      const lecture = db.get("lectures").find((l) => l.id === id);
+      if (lecture) {
+        const nextSegs = remapSegments(lecture.segments || []);
+        const nextFullText = nextSegs.map((s) => `${s.speaker}: ${s.text}`).join("\n");
+        db.update("lectures", (list) =>
+          list.map((l) =>
+            l.id === id
+              ? {
+                  ...l,
+                  segments: nextSegs,
+                  fullText: nextFullText,
+                  updatedAt: new Date().toISOString(),
+                }
+              : l,
+          ),
+        );
+        return Response.json({ success: true, updatedSegments: updatedCount, segments: nextSegs });
+      }
+
+      return Response.json({ error: "Transcript resource not found" }, { status: 404 });
+    }
+
+    if (
+      pathname.startsWith("/api/v1/transcripts/") &&
+      pathname.endsWith("/export") &&
+      method === "GET"
+    ) {
+      const id = pathname.replace("/api/v1/transcripts/", "").replace("/export", "");
+      const format = (url.searchParams.get("format") || "html").toLowerCase();
+      const meeting = db.get("meetings").find((m) => m.id === id);
+      const lecture = db.get("lectures").find((l) => l.id === id);
+      const item = meeting || lecture;
+      if (!item) return Response.json({ error: "Transcript resource not found" }, { status: 404 });
+
+      const segments = item.segments || [];
+      const summary = item.summary || (lecture ? lecture.studyNotes : "") || "";
+      const isArabic = /[\u0600-\u06FF]/.test(
+        `${item.title} ${segments.map((s) => s.text).join(" ")}`,
+      );
+      const fmtTime = (sec: number) =>
+        `${Math.floor(sec / 60)
+          .toString()
+          .padStart(2, "0")}:${Math.floor(sec % 60)
+          .toString()
+          .padStart(2, "0")}`;
+
+      if (format === "txt") {
+        const lines = [
+          `# ${item.title}`,
+          summary ? `\n${summary}\n` : "",
+          ...segments.map(
+            (s) => `[${fmtTime(s.startTime)} - ${fmtTime(s.endTime)}] ${s.speaker}: ${s.text}`,
+          ),
+        ].join("\n");
+        return new Response("\uFEFF" + lines, {
+          headers: {
+            "Content-Type": "text/plain; charset=utf-8",
+            "Content-Disposition": `attachment; filename="transcript_${item.id}.txt"`,
+          },
+        });
+      }
+
+      const html = `<!DOCTYPE html>
+<html lang="${isArabic ? "ar" : "en"}" dir="${isArabic ? "rtl" : "ltr"}">
+<head><meta charset="utf-8" /><title>${escapeHtml(item.title)}</title>
+<style>body{font-family:'Segoe UI',Tahoma,Arial,sans-serif;max-width:820px;margin:32px auto;line-height:1.7;color:#111}h1{color:#7c5a10;border-bottom:2px solid #d4af37;padding-bottom:8px}.seg{margin:10px 0;padding:10px;border-inline-start:3px solid #d4af37;background:#fafafa}.meta{font-size:12px;color:#555;font-weight:bold}@media print{body{margin:12mm}}</style>
+</head><body>
+<h1>${escapeHtml(item.title)}</h1>
+${summary ? `<section><h2>${isArabic ? "الملخص" : "Summary"}</h2><pre style="white-space:pre-wrap;font-family:inherit">${escapeHtml(summary)}</pre></section>` : ""}
+<section><h2>${isArabic ? "النص المفرغ" : "Transcript"}</h2>
+${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime)} - ${fmtTime(s.endTime)}] ${escapeHtml(s.speaker)}</div><div>${escapeHtml(s.text)}</div></div>`).join("\n")}
+</section></body></html>`;
+
+      return new Response(html, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Content-Disposition": `attachment; filename="transcript_${item.id}.html"`,
+        },
+      });
+    }
+
+    if (
+      pathname.startsWith("/api/v1/transcripts/") &&
       !pathname.startsWith("/api/v1/transcripts/session") &&
       method === "GET"
     ) {
@@ -885,6 +1482,8 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
           title: meeting.title,
           type: "meeting",
           segments: meeting.segments,
+          keywords: meeting.keywords || [],
+          highlights: meeting.highlights || [],
         });
       }
       if (lecture) {
@@ -893,6 +1492,8 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
           title: lecture.title,
           type: "lecture",
           segments: lecture.segments,
+          keywords: lecture.keywords || [],
+          highlights: lecture.highlights || [],
         });
       }
 
@@ -1119,47 +1720,91 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
       });
     }
 
-    // 4. REAL-TIME AUDIO CHUNK INGESTION & AUTO-APPEND TO DB
+    // 4. REAL-TIME AUDIO CHUNK INGESTION & AUTO-APPEND TO DB (Supports both multipart/form-data and JSON)
     if (pathname === "/api/v1/transcripts/live-chunk" && method === "POST") {
-      const body = await req.json();
-      const {
-        recordingId,
-        audioBase64,
-        mimeType,
-        chunkIndex = 0,
-        startTime = 0,
-        endTime = 3,
-        speaker = "المتحدث 1",
-        interimText,
-        recentContext,
-      } = body;
+      const contentType = (req.headers.get("content-type") || "").toLowerCase();
+      let recordingId = "";
+      let audioBase64: string | undefined;
+      let mimeType: string | undefined;
+      let chunkIndex = 0;
+      let startTime = 0;
+      let endTime = 3;
+      let speaker = "Speaker 1";
+      let interimText: string | undefined;
+      let recentContext: string | undefined;
+      let language = "auto";
+      let isMeeting = false;
+
+      if (contentType.includes("multipart/form-data")) {
+        const formData = await req.formData();
+        recordingId = String(formData.get("recordingId") || "");
+        const file = formData.get("file") as File | null;
+        if (file && file.size > 0) {
+          const buf = Buffer.from(await file.arrayBuffer());
+          audioBase64 = buf.toString("base64");
+          mimeType = file.type || String(formData.get("mimeType") || "audio/webm");
+        } else {
+          audioBase64 = formData.get("audioBase64")
+            ? String(formData.get("audioBase64"))
+            : undefined;
+          mimeType = formData.get("mimeType") ? String(formData.get("mimeType")) : "audio/webm";
+        }
+        chunkIndex = Number(formData.get("chunkIndex") || 0) || 0;
+        startTime = Number(formData.get("startTime") ?? formData.get("offsetSeconds") ?? 0) || 0;
+        endTime = Number(formData.get("endTime") ?? startTime + 3) || startTime + 3;
+        speaker = String(formData.get("speaker") || "Speaker 1");
+        interimText = formData.get("interimText") ? String(formData.get("interimText")) : undefined;
+        recentContext = formData.get("recentContext")
+          ? String(formData.get("recentContext"))
+          : undefined;
+        language = String(formData.get("language") || "auto");
+        isMeeting = String(formData.get("isMeeting") || "false") === "true";
+      } else {
+        const body = await req.json();
+        recordingId = body.recordingId || "";
+        audioBase64 = body.audioBase64;
+        mimeType = body.mimeType;
+        chunkIndex = Number(body.chunkIndex ?? 0) || 0;
+        startTime = Number(body.startTime ?? 0) || 0;
+        endTime = Number(body.endTime ?? 3) || 3;
+        speaker = body.speaker || "Speaker 1";
+        interimText = body.interimText;
+        recentContext = body.recentContext;
+        language = body.language || "auto";
+        isMeeting = Boolean(body.isMeeting);
+      }
 
       const result = await transcribeAndTranslateAudioChunk({
         audioBase64,
         mimeType,
         interimText,
         recentContext,
+        language,
+        offsetSeconds: startTime,
+        isMeeting,
       });
 
-      const cleanArabic = (result.arabicText || "").trim();
+      const cleanText = (result.text || result.arabicText || "").trim();
       const isValidPhrase =
-        cleanArabic &&
-        cleanArabic !== "[صمت]" &&
-        !cleanArabic.toLowerCase().includes("[silence]") &&
-        !cleanArabic.includes("جاري الاستماع") &&
-        !cleanArabic.includes("جاري تفريغ") &&
-        !cleanArabic.includes("جاري المعالجة");
+        cleanText &&
+        cleanText !== "[صمت]" &&
+        !cleanText.toLowerCase().includes("[silence]") &&
+        !cleanText.includes("جاري الاستماع") &&
+        !cleanText.includes("جاري تفريغ") &&
+        !cleanText.includes("جاري المعالجة");
 
       let savedToDb = false;
       if (isValidPhrase && recordingId) {
-        // Auto-persist directly into database for this active recording session
         const now = new Date().toISOString();
         const segObj = {
           id: `chunk_${Date.now()}_${chunkIndex}`,
           speaker,
           startTime: Math.round(startTime),
           endTime: Math.max(Math.round(endTime), Math.round(startTime) + 1),
-          text: cleanArabic,
+          text: cleanText,
+          language,
+          isPartial: false,
+          chunkIndex,
         };
 
         const meetings = db.get("meetings");
@@ -1170,9 +1815,9 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
             item.segments = item.segments || [];
             const duplicate = item.segments.some(
               (s) =>
-                s.text.trim() === cleanArabic ||
+                s.text.trim() === cleanText ||
                 (Math.abs(s.startTime - startTime) < 2.5 &&
-                  (s.text.includes(cleanArabic) || cleanArabic.includes(s.text))),
+                  (s.text.includes(cleanText) || cleanText.includes(s.text))),
             );
             if (!duplicate) {
               item.segments.push(segObj);
@@ -1193,9 +1838,9 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
               item.segments = item.segments || [];
               const duplicate = item.segments.some(
                 (s) =>
-                  s.text.trim() === cleanArabic ||
+                  s.text.trim() === cleanText ||
                   (Math.abs(s.startTime - startTime) < 2.5 &&
-                    (s.text.includes(cleanArabic) || cleanArabic.includes(s.text))),
+                    (s.text.includes(cleanText) || cleanText.includes(s.text))),
               );
               if (!duplicate) {
                 item.segments.push(segObj);
@@ -1217,7 +1862,8 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
         startTime,
         endTime,
         speaker,
-        arabicText: cleanArabic,
+        arabicText: cleanText,
+        text: cleanText,
         detectedLanguage: result.detectedLanguage,
         isFinal: true,
         savedToDb,
@@ -1294,46 +1940,75 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
       // Chronological sort
       mergedSegments.sort((a, b) => a.startTime - b.startTime);
 
-      // Build consolidated Arabic document
       const consolidatedFullText = mergedSegments.map((s) => s.text).join(" ");
 
-      // 3. Build comprehensive AI analysis in Arabic
-      const analysis = generateAnalysisFromTranscript(title, mergedSegments, type, courseCode);
+      // If no live segments were captured yet and we have a real recorded audio file, queue background ASR pipeline
+      if (mergedSegments.length === 0 && recordingPath && fs.existsSync(recordingPath)) {
+        const probe = await validateMediaFile(recordingPath, `recording_${resourceId}.webm`);
+        if (probe.valid) {
+          const job = createJob(
+            type,
+            resourceId,
+            `recording_${resourceId}.webm`,
+            recordingPath,
+            body.language || "auto",
+            {
+              userId: user?.id || "usr_admin",
+            },
+          );
+          setTimeout(() => {
+            void processRecordingJob(
+              job.id,
+              type,
+              resourceId,
+              recordingPath!,
+              `recording_${resourceId}.webm`,
+              body.language || "auto",
+            );
+          }, 50);
 
-      // 4. Update or Insert Database Record
+          return Response.json({
+            success: true,
+            resourceId,
+            jobId: job.id,
+            segmentsCount: 0,
+            hasAudio: true,
+            status: "Processing",
+          });
+        }
+      }
+
+      const keywords = extractKeywordsWithFrequency(mergedSegments, 10);
+      const highlights = extractHighlightsFromSegments(mergedSegments);
+      const analysis =
+        mergedSegments.length > 0
+          ? await generateAiSummary(title, mergedSegments, type, courseCode)
+          : { summary: "", keyPoints: [], decisions: [], actionItems: [] };
+
       if (type === "meeting") {
         const meetingObj: MeetingRecord = {
           id: resourceId,
           workspaceId: "ws_default",
           title: existingMeeting?.title || title,
-          hostName: existingMeeting?.hostName || user?.name || "المضيف",
+          hostName: existingMeeting?.hostName || user?.name || "Organizer",
           hostId: existingMeeting?.hostId || user?.id || "usr_admin",
           date: existingMeeting?.date || now.split("T")[0],
           durationSeconds: Math.max(1, durationSeconds, existingMeeting?.durationSeconds || 1),
           participantsCount: existingMeeting?.participantsCount || 1,
-          status: "Completed",
+          status: mergedSegments.length > 0 ? "Completed" : "Failed",
           recordingPath: recordingPath || existingMeeting?.recordingPath,
           recordingFileName: recordingPath
             ? `recording_${resourceId}.webm`
             : existingMeeting?.recordingFileName,
           audioUrl: audioUrl || existingMeeting?.audioUrl,
           summary: analysis.summary,
+          executiveSummary: analysis.summary,
+          detailedSummary: analysis.summary,
           keyPoints: analysis.keyPoints,
           decisions: analysis.decisions,
-          topics: analysis.topics,
-          analysis: {
-            topics: analysis.topics,
-            keywords: analysis.keyPoints.slice(0, 5),
-            definitions: analysis.keyConcepts || [],
-            questionsAsked: [],
-            actionItems: analysis.actionItems.map((a) => ({
-              task: a.title,
-              owner: a.ownerName,
-              deadline: a.dueDate,
-            })),
-            emphasizedPoints: analysis.keyPoints,
-            reviewAreas: analysis.topics,
-          },
+          topics: keywords.slice(0, 4).map((k) => k.term),
+          keywords,
+          highlights,
           fullText: consolidatedFullText,
           segments: mergedSegments,
           createdAt: existingMeeting?.createdAt || now,
@@ -1353,37 +2028,23 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
           workspaceId: "ws_default",
           title: existingLecture?.title || title,
           courseCode: existingLecture?.courseCode || courseCode || "CS 101",
-          instructorName: existingLecture?.instructorName || user?.name || "المحاضر",
+          instructorName: existingLecture?.instructorName || user?.name || "Lecturer",
           instructorId: existingLecture?.instructorId || user?.id || "usr_admin",
           date: existingLecture?.date || now.split("T")[0],
           durationSeconds: Math.max(1, durationSeconds, existingLecture?.durationSeconds || 1),
-          status: "Completed",
+          status: mergedSegments.length > 0 ? "Completed" : "Failed",
           recordingPath: recordingPath || existingLecture?.recordingPath,
           recordingFileName: recordingPath
             ? `recording_${resourceId}.webm`
             : existingLecture?.recordingFileName,
           audioUrl: audioUrl || existingLecture?.audioUrl,
-          studyNotes: analysis.lectureNotes,
+          studyNotes: analysis.summary,
           summary: analysis.summary,
-          keyConcepts: analysis.keyConcepts,
-          examHighlights: analysis.examHighlights,
-          topics: analysis.topics,
-          analysis: {
-            topics: analysis.topics,
-            keywords: (analysis.keyConcepts || []).map((k) => k.term),
-            definitions: analysis.keyConcepts || [],
-            questionsAsked: (analysis.quiz?.questions || []).map((q) => ({
-              question: q.question,
-              answer: q.explanation,
-            })),
-            actionItems: analysis.actionItems.map((a) => ({
-              task: a.title,
-              owner: a.ownerName,
-              deadline: a.dueDate,
-            })),
-            emphasizedPoints: analysis.examHighlights || [],
-            reviewAreas: analysis.topics,
-          },
+          executiveSummary: analysis.summary,
+          detailedSummary: analysis.summary,
+          topics: keywords.slice(0, 4).map((k) => k.term),
+          keywords,
+          highlights,
           fullText: consolidatedFullText,
           segments: mergedSegments,
           createdAt: existingLecture?.createdAt || now,
@@ -1398,45 +2059,53 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
           db.update("lectures", (lectures) => [lectureObj, ...lectures]);
         }
 
-        if (analysis.quiz) {
-          db.update("quizzes", (quizzes) => [
-            {
-              id: `quiz_${resourceId}`,
-              lectureId: resourceId,
-              title: analysis.quiz!.title,
-              courseCode: courseCode || "CS 101",
-              questions: analysis.quiz!.questions.map((q, idx) => ({
-                id: `q_${resourceId}_${idx + 1}`,
-                question: q.question,
-                options: q.options,
-                correctOptionIndex: q.correctOptionIndex,
-                explanation: q.explanation,
-              })),
-              attemptsCount: 0,
-              createdAt: now,
-            },
-            ...quizzes.filter((q) => q.lectureId !== resourceId),
-          ]);
+        if (mergedSegments.length > 0) {
+          const generatedQuiz = await generateAiQuiz(
+            title,
+            mergedSegments,
+            analysis.summary,
+            courseCode,
+          );
+          if (generatedQuiz.questions.length > 0) {
+            db.update("quizzes", (quizzes) => [
+              {
+                id: `quiz_${resourceId}`,
+                lectureId: resourceId,
+                title: generatedQuiz.title,
+                courseCode: courseCode || "CS 101",
+                questions: generatedQuiz.questions,
+                attemptsCount: 0,
+                createdAt: now,
+              },
+              ...quizzes.filter((q) => q.lectureId !== resourceId),
+            ]);
+          }
         }
       }
 
-      // Mark session complete
       db.update("recordingSessions", (sessions) =>
         sessions.map((s) =>
           s.id === resourceId
-            ? { ...s, status: "Completed", completedAt: now, segmentsCount: mergedSegments.length }
+            ? {
+                ...s,
+                status: mergedSegments.length > 0 ? "Completed" : "Failed",
+                completedAt: now,
+                segmentsCount: mergedSegments.length,
+              }
             : s,
         ),
       );
 
-      // Notification
       db.update("notifications", (notifs) => [
         {
           id: `notif_${Date.now()}`,
           userId: user?.id || "usr_admin",
-          title: "اكتمل حفظ وتوثيق التسجيل بنجاح",
-          body: `تم حفظ الملف الصوتي والنص المفرغ الكامل (${mergedSegments.length} جملة) لجلسة "${title}".`,
-          targetUrl: "/transcript",
+          title:
+            mergedSegments.length > 0
+              ? "Recording finalized and analyzed"
+              : "Recording had no speech detected",
+          body: `Processed "${title}" (${mergedSegments.length} segments).`,
+          targetUrl: `/transcript?id=${resourceId}`,
           read: false,
           type: "summary",
           createdAt: now,
@@ -1445,11 +2114,11 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
       ]);
 
       return Response.json({
-        success: true,
+        success: mergedSegments.length > 0,
         resourceId,
         segmentsCount: mergedSegments.length,
         hasAudio: !!(recordingPath || existingItem?.recordingPath),
-        status: "Completed",
+        status: mergedSegments.length > 0 ? "Completed" : "Failed",
       });
     }
 
@@ -1588,7 +2257,7 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
 
     if (pathname === "/api/v1/ai/ask" && method === "POST") {
       const body = await req.json();
-      const { question, resourceId, history } = body;
+      const { question, resourceId, recordingId, history } = body;
 
       if (!question || typeof question !== "string" || !question.trim()) {
         return Response.json({ error: "Question is required" }, { status: 400 });
@@ -1596,7 +2265,7 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
 
       const result = await askMeetMindAI({
         question: question.trim(),
-        resourceId,
+        resourceId: resourceId || recordingId,
         history: Array.isArray(history) ? history : [],
       });
 
@@ -1631,10 +2300,15 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
     // ACTION ITEMS / TASKS
     // ----------------------------------------------------
     if (pathname === "/api/v1/tasks" && method === "GET") {
-      return Response.json(db.get("actionItems"));
+      const user = getAuthUser(req);
+      const tasks = db.get("actionItems");
+      return Response.json(
+        isUserAdmin(user) ? tasks : tasks.filter((t) => !t.userId || t.userId === user?.id),
+      );
     }
 
     if (pathname === "/api/v1/tasks" && method === "POST") {
+      const user = getAuthUser(req);
       const body = await req.json();
       const { title, ownerName, dueDate, priority, meetingId } = body;
 
@@ -1644,10 +2318,12 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
 
       const newTask: ActionItemRecord = {
         id: `t_${Date.now()}`,
+        userId: user?.id || "usr_admin",
         meetingId,
         title,
-        ownerName: ownerName || "Alex Kim",
-        dueDate: dueDate || new Date(Date.now() + 86400000).toISOString().split("T")[0],
+        ownerName: ownerName || undefined,
+        dueDate: dueDate || undefined,
+        deadlineText: dueDate || "Deadline not specified.",
         priority: priority || "medium",
         completed: false,
         createdAt: new Date().toISOString(),
@@ -1684,8 +2360,57 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
     }
 
     // ----------------------------------------------------
-    // QUIZZES
+    // QUIZZES & ASSESSMENT
     // ----------------------------------------------------
+    if (pathname === "/api/v1/quizzes/attempts" && method === "GET") {
+      const quizId = url.searchParams.get("quizId");
+      const attempts = db.get("quizAttempts") || [];
+      if (quizId) {
+        return Response.json(attempts.filter((a) => a.quizId === quizId));
+      }
+      return Response.json(attempts);
+    }
+
+    if (pathname === "/api/v1/quizzes/generate" && method === "POST") {
+      const body = await req.json();
+      const { lectureId, avoidQuestionTitles = [], variant = 2 } = body;
+
+      const lecture = db.get("lectures").find((l) => l.id === lectureId);
+      if (!lecture) {
+        return Response.json({ error: "Lecture not found" }, { status: 404 });
+      }
+
+      const generated = await generateAiQuiz(
+        lecture.title,
+        lecture.segments,
+        lecture.summary || lecture.studyNotes,
+        lecture.courseCode,
+        {
+          avoidQuestionTitles,
+          variant,
+        },
+      );
+
+      const newQuizId = `quiz_${Date.now()}`;
+      const newQuiz = {
+        id: newQuizId,
+        lectureId,
+        title: generated.title,
+        courseCode: generated.courseCode,
+        questions: generated.questions,
+        attemptsCount: 0,
+        createdAt: new Date().toISOString(),
+      };
+
+      db.update("quizzes", (quizzes) => [
+        newQuiz,
+        ...quizzes.filter((q) => q.lectureId !== lectureId),
+      ]);
+
+      notifySync({ type: "QUIZ_GENERATED", id: newQuizId });
+      return Response.json(newQuiz, { status: 201 });
+    }
+
     if (pathname === "/api/v1/quizzes" && method === "GET") {
       return Response.json(db.get("quizzes"));
     }
@@ -1710,35 +2435,89 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
     ) {
       const id = pathname.replace("/api/v1/quizzes/", "").replace("/attempt", "");
       const body = await req.json();
-      const { answers } = body as { answers: Record<string, number> };
+      const { answers = {}, userId = "usr_admin" } = body as {
+        answers: Record<string, string | number>;
+        userId?: string;
+      };
 
       const quiz = db.get("quizzes").find((q) => q.id === id);
       if (!quiz) return Response.json({ error: "Quiz not found" }, { status: 404 });
 
+      // Normalization helper for Arabic text (strips diacritics, tatweel, extra spaces)
+      const normalizeAr = (str: string) =>
+        (str || "")
+          .trim()
+          .toLowerCase()
+          .replace(/[\u064B-\u065F\u0670\u0640]/g, "")
+          .replace(/[أإآ]/g, "ا")
+          .replace(/[ة]/g, "ه")
+          .replace(/[ى]/g, "ي");
+
       let correctCount = 0;
       const results = quiz.questions.map((q) => {
-        const chosen = answers[q.id];
-        const isCorrect = chosen === q.correctOptionIndex;
+        const rawAnswer = answers[q.id];
+        let isCorrect = false;
+
+        if (q.type === "true_false" || q.type === "multiple_choice" || !q.type) {
+          isCorrect = Number(rawAnswer) === q.correctOptionIndex;
+        } else if (q.type === "fill_in_the_blank") {
+          const userText = normalizeAr(String(rawAnswer || ""));
+          const correctText = normalizeAr(q.correctAnswerText || "");
+          const accepted = (q.acceptableAnswers || []).map(normalizeAr);
+          isCorrect =
+            userText.length > 0 &&
+            (userText === correctText ||
+              accepted.includes(userText) ||
+              correctText.includes(userText));
+        } else if (q.type === "short_answer") {
+          const userText = String(rawAnswer || "").trim();
+          // Short answer is considered answered and reviewed if non-empty
+          isCorrect = userText.length >= 8;
+        }
+
         if (isCorrect) correctCount++;
+
         return {
           questionId: q.id,
-          chosenOptionIndex: chosen,
+          type: q.type || "multiple_choice",
+          userAnswer: rawAnswer,
           correctOptionIndex: q.correctOptionIndex,
+          correctAnswerText: q.correctAnswerText,
           isCorrect,
           explanation: q.explanation,
         };
       });
 
-      const scorePercent = Math.round((correctCount / quiz.questions.length) * 100);
+      const scorePercent = Math.round((correctCount / Math.max(quiz.questions.length, 1)) * 100);
+
+      // Record attempt permanently in database
+      const attemptRecord = {
+        id: `att_${Date.now()}`,
+        quizId: id,
+        lectureId: quiz.lectureId,
+        userId,
+        scorePercent,
+        correctCount,
+        totalQuestions: quiz.questions.length,
+        answers,
+        submittedAt: new Date().toISOString(),
+      };
+
+      db.update("quizAttempts", (attempts = []) => [attemptRecord, ...(attempts || [])]);
 
       db.update("quizzes", (quizzes) =>
         quizzes.map((q) =>
-          q.id === id ? { ...q, attemptsCount: q.attemptsCount + 1, lastScore: scorePercent } : q,
+          q.id === id
+            ? { ...q, attemptsCount: (q.attemptsCount || 0) + 1, lastScore: scorePercent }
+            : q,
         ),
       );
 
+      notifySync({ type: "QUIZ_ATTEMPT_SUBMITTED", id });
+
       return Response.json({
         quizId: id,
+        attemptId: attemptRecord.id,
         totalQuestions: quiz.questions.length,
         correctCount,
         scorePercent,
@@ -1777,11 +2556,101 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
       return Response.json(updated.find((c) => c.id === id));
     }
 
+    if (pathname === "/api/v1/flashcards/generate" && method === "POST") {
+      const body = await req.json();
+      const { lectureId, meetingId } = body;
+      const targetId = lectureId || meetingId;
+      const lecture = targetId
+        ? db.get("lectures").find((l) => l.id === targetId)
+        : db.get("lectures")[0];
+      const meeting = targetId ? db.get("meetings").find((m) => m.id === targetId) : undefined;
+      const resource = lecture || meeting;
+
+      if (!resource) {
+        return Response.json(
+          { error: "No lecture or meeting found for flashcard generation" },
+          { status: 400 },
+        );
+      }
+
+      const generated = await generateAiFlashcards(
+        resource.title,
+        resource.segments,
+        resource.summary,
+        "courseCode" in resource ? resource.courseCode : undefined,
+      );
+
+      const now = new Date().toISOString();
+      const newCards = generated.map((c, idx) => ({
+        id: `fc_${Date.now()}_${idx + 1}`,
+        deckId: `deck_${resource.id}`,
+        deckTitle:
+          resource.title.length > 35 ? resource.title.slice(0, 35) + "..." : resource.title,
+        lectureId: "courseCode" in resource ? resource.id : undefined,
+        front: c.front,
+        back: c.back,
+        mastered: false,
+        reviewCount: 0,
+        createdAt: now,
+      }));
+
+      db.update("flashcards", (cards) => [
+        ...newCards,
+        ...cards.filter((c) => c.deckId !== `deck_${resource.id}`),
+      ]);
+
+      return Response.json(newCards, { status: 201 });
+    }
+
     // ----------------------------------------------------
     // MIND MAPS
     // ----------------------------------------------------
     if (pathname === "/api/v1/mindmaps" && method === "GET") {
       return Response.json(db.get("mindMaps"));
+    }
+
+    if (pathname === "/api/v1/mindmaps/generate" && method === "POST") {
+      const body = await req.json();
+      const { lectureId, meetingId } = body;
+      const targetId = lectureId || meetingId;
+      const lecture = targetId
+        ? db.get("lectures").find((l) => l.id === targetId)
+        : db.get("lectures")[0];
+      const meeting = targetId ? db.get("meetings").find((m) => m.id === targetId) : undefined;
+      const resource = lecture || meeting;
+
+      if (!resource) {
+        return Response.json(
+          { error: "No lecture or meeting found for mind map generation" },
+          { status: 400 },
+        );
+      }
+
+      const rootNode = await generateAiMindMap(
+        resource.title,
+        resource.segments,
+        resource.summary,
+        "courseCode" in resource ? resource.courseCode : undefined,
+      );
+
+      const now = new Date().toISOString();
+      const newMap = {
+        id: `mm_${Date.now()}`,
+        title: resource.title,
+        lectureId: "courseCode" in resource ? resource.id : undefined,
+        meetingId: !("courseCode" in resource) ? resource.id : undefined,
+        rootNode,
+        createdAt: now,
+      };
+
+      db.update("mindMaps", (maps) => [
+        newMap,
+        ...maps.filter((m) =>
+          "courseCode" in resource ? m.lectureId !== resource.id : m.meetingId !== resource.id,
+        ),
+      ]);
+
+      return Response.json(newMap, { status: 201 });
     }
 
     // ----------------------------------------------------
@@ -1887,33 +2756,69 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
     // SEARCH
     // ----------------------------------------------------
     if (pathname === "/api/v1/search" && method === "GET") {
-      const q = url.searchParams.get("q")?.toLowerCase() || "";
+      const q = (url.searchParams.get("q") || "").trim();
       if (!q) {
         return Response.json({ meetings: [], lectures: [], tasks: [], transcripts: [] });
       }
 
       const meetings = db
         .get("meetings")
-        .filter((m) => m.title.toLowerCase().includes(q) || m.summary?.toLowerCase().includes(q));
+        .filter((m) => matchesArabicQuery(m.title, q) || matchesArabicQuery(m.summary, q));
 
       const lectures = db
         .get("lectures")
-        .filter((l) => l.title.toLowerCase().includes(q) || l.courseCode.toLowerCase().includes(q));
+        .filter(
+          (l) =>
+            matchesArabicQuery(l.title, q) ||
+            matchesArabicQuery(l.courseCode, q) ||
+            matchesArabicQuery(l.summary, q) ||
+            matchesArabicQuery(l.studyNotes, q),
+        );
 
-      const tasks = db.get("actionItems").filter((t) => t.title.toLowerCase().includes(q));
+      const tasks = db.get("actionItems").filter((t) => matchesArabicQuery(t.title, q));
 
-      const transcripts: { id: string; title: string; quote: string; time: number }[] = [];
+      const transcripts: {
+        id: string;
+        title: string;
+        type: "meeting" | "lecture";
+        courseCode?: string;
+        quote: string;
+        time: number;
+      }[] = [];
+
+      // Search meeting transcripts
       for (const m of db.get("meetings")) {
-        for (const seg of m.segments) {
-          if (seg.text.toLowerCase().includes(q)) {
+        for (const seg of m.segments || []) {
+          if (matchesArabicQuery(seg.text, q)) {
             transcripts.push({
               id: m.id,
               title: m.title,
+              type: "meeting",
               quote: seg.text,
               time: seg.startTime,
             });
+            if (transcripts.length >= 40) break;
           }
         }
+        if (transcripts.length >= 40) break;
+      }
+
+      // Search lecture transcripts
+      for (const l of db.get("lectures")) {
+        for (const seg of l.segments || []) {
+          if (matchesArabicQuery(seg.text, q)) {
+            transcripts.push({
+              id: l.id,
+              title: `${l.courseCode} — ${l.title}`,
+              type: "lecture",
+              courseCode: l.courseCode,
+              quote: seg.text,
+              time: seg.startTime,
+            });
+            if (transcripts.length >= 40) break;
+          }
+        }
+        if (transcripts.length >= 40) break;
       }
 
       return Response.json({

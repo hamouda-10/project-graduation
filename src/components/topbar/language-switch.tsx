@@ -1,5 +1,4 @@
 import { Globe, Check } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -29,32 +28,36 @@ export function LanguageSwitch() {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-9 gap-1.5 px-2.5 text-xs font-semibold hover:bg-accent/40 cursor-pointer"
+        <button
+          type="button"
+          className="flex h-9 items-center gap-1.5 px-3 rounded-lg border border-amber-500/25 bg-zinc-950/80 text-xs font-semibold text-amber-300 transition-all hover:border-amber-500/50 hover:bg-zinc-900 cursor-pointer shadow-sm"
           title="Switch Language / تغيير اللغة"
         >
-          <Globe className="h-4 w-4 text-primary" />
+          <Globe className="h-4 w-4 text-amber-400" />
           <span>{language === "AR" ? "العربية" : "EN"}</span>
-        </Button>
+        </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-52">
-        <DropdownMenuLabel className="text-xs font-semibold">{t("language")}</DropdownMenuLabel>
-        <DropdownMenuSeparator />
+      <DropdownMenuContent
+        align="end"
+        className="w-44 p-1 bg-zinc-950/95 border-amber-500/40 backdrop-blur-xl"
+      >
+        <DropdownMenuLabel className="px-2 py-1 text-[10.5px] font-bold uppercase tracking-wider text-amber-400/90">
+          {t("language")}
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator className="my-1 bg-amber-500/20" />
         {LANGS.map((l) => {
           const isSelected = language === l.code;
           return (
             <DropdownMenuItem
               key={l.code}
               onClick={() => handleSelect(l.code)}
-              className="flex items-center justify-between cursor-pointer py-2"
+              className="flex items-center justify-between cursor-pointer px-2 py-1.5 rounded-md hover:bg-amber-500/10 hover:text-amber-300"
             >
               <div className="flex items-center gap-2">
-                <span className="font-semibold text-xs text-primary">{l.code}</span>
+                <span className="font-bold text-xs text-amber-400">{l.code}</span>
                 <span className="text-xs">{l.native}</span>
               </div>
-              {isSelected && <Check className="h-4 w-4 text-primary" />}
+              {isSelected && <Check className="h-3.5 w-3.5 text-amber-400" />}
             </DropdownMenuItem>
           );
         })}

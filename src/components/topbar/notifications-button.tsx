@@ -1,26 +1,30 @@
 import { Bell } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "@/lib/api-client";
 import { useUIStore } from "@/stores/ui-store";
-import { NOTIFICATIONS_GROUPED } from "@/lib/mock-data";
 
 export function NotificationsButton() {
   const setOpen = useUIStore((s) => s.setNotificationsOpen);
-  const unread = NOTIFICATIONS_GROUPED.flatMap((g) => g.items).filter((i) => i.unread).length;
+  const { data: notifications = [] } = useQuery({
+    queryKey: ["notifications"],
+    queryFn: () => api.getNotifications(),
+  });
+  const unread = notifications.filter((n) => !n.read).length;
+
   return (
-    <Button
-      variant="ghost"
-      size="icon"
-      className="relative h-9 w-9"
+    <button
+      type="button"
+      className="relative flex h-9 w-9 items-center justify-center rounded-lg border border-amber-500/25 bg-zinc-950/80 text-amber-400 transition-all hover:border-amber-500/50 hover:bg-zinc-900 hover:text-amber-300 cursor-pointer shadow-sm"
       aria-label="Notifications"
       onClick={() => setOpen(true)}
     >
       <Bell className="h-4 w-4" />
       {unread > 0 && (
         <>
-          <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-primary ring-2 ring-background" />
-          <span className="absolute right-1.5 top-1.5 h-2 w-2 animate-ping rounded-full bg-primary/70" />
+          <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-amber-400 ring-2 ring-zinc-950" />
+          <span className="absolute right-1.5 top-1.5 h-2 w-2 animate-ping rounded-full bg-amber-400/70" />
         </>
       )}
-    </Button>
+    </button>
   );
 }

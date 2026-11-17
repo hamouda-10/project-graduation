@@ -40,15 +40,38 @@ export interface TranscriptSegment {
   startTime: number; // in seconds
   endTime: number;
   text: string;
+  confidence?: number;
+  language?: string;
+  isPartial?: boolean;
+  chunkIndex?: number;
+}
+
+export interface KeywordItem {
+  term: string;
+  frequency: number;
+  importance: number;
+  segmentIds?: string[];
+}
+
+export interface HighlightItem {
+  quote: string;
+  context?: string;
+  speaker?: string;
+  timestamp?: string;
+  category: string;
+  priority: string;
 }
 
 export interface ActionItemRecord {
   id: string;
+  userId?: string;
   meetingId?: string;
   lectureId?: string;
   title: string;
   ownerName?: string;
   dueDate?: string;
+  deadlineText?: string;
+  sourceTimestamp?: string;
   priority: "high" | "medium" | "low";
   completed: boolean;
   createdAt: string;
@@ -64,13 +87,18 @@ export interface MeetingRecord {
   durationSeconds: number;
   participantsCount: number;
   status: "Completed" | "Processing" | "Queued" | "Failed";
+  language?: string;
   recordingPath?: string;
   recordingFileName?: string;
   audioUrl?: string;
   summary?: string;
+  executiveSummary?: string;
+  detailedSummary?: string;
   keyPoints?: string[];
   decisions?: string[];
   topics?: string[];
+  keywords?: KeywordItem[];
+  highlights?: HighlightItem[];
   analysis?: {
     topics: string[];
     keywords: string[];
@@ -96,14 +124,19 @@ export interface LectureRecord {
   date: string;
   durationSeconds: number;
   status: "Completed" | "Processing" | "Queued" | "Failed";
+  language?: string;
   recordingPath?: string;
   recordingFileName?: string;
   audioUrl?: string;
   studyNotes?: string;
   summary?: string;
+  executiveSummary?: string;
+  detailedSummary?: string;
   keyConcepts?: { term: string; definition: string }[];
   examHighlights?: string[];
   topics?: string[];
+  keywords?: KeywordItem[];
+  highlights?: HighlightItem[];
   analysis?: {
     topics: string[];
     keywords: string[];
@@ -135,11 +168,27 @@ export interface RecordingSessionRecord {
 export interface QuizQuestionRecord {
   id: string;
   question: string;
-  type?: "multiple_choice" | "true_false" | "short_answer";
+  type?: "multiple_choice" | "true_false" | "short_answer" | "fill_in_the_blank";
   options: string[];
   correctOptionIndex: number;
+  correctAnswerText?: string;
+  acceptableAnswers?: string[];
   explanation: string;
+  difficulty?: "easy" | "medium" | "hard";
+  sectionRef?: string;
   timestampRef?: string;
+}
+
+export interface QuizAttemptRecord {
+  id: string;
+  quizId: string;
+  lectureId?: string;
+  userId: string;
+  scorePercent: number;
+  correctCount: number;
+  totalQuestions: number;
+  answers: Record<string, string | number>;
+  submittedAt: string;
 }
 
 export interface QuizRecord {
@@ -206,6 +255,7 @@ export interface CalendarEventRecord {
 export type JobStatus =
   | "Uploaded"
   | "Validating"
+  | "ExtractingAudio"
   | "Queued"
   | "Transcribing"
   | "Translating"
@@ -213,18 +263,28 @@ export type JobStatus =
   | "Analyzing"
   | "Generating Quiz"
   | "Completed"
-  | "Failed";
+  | "Failed"
+  | "Cancelled";
 
 export interface JobRecord {
   id: string;
+  userId?: string;
+  correlationId?: string;
+  idempotencyKey?: string;
   type: "transcription" | "analysis" | "quiz_generation";
   status: JobStatus;
+  stage?: string;
   progressPercent: number;
   resourceType: "meeting" | "lecture";
   resourceId: string;
   fileName: string;
   filePath?: string;
   originalFilename?: string;
+  language?: string;
+  retryCount?: number;
+  maxRetries?: number;
+  failureCategory?: string;
+  failureTimestamp?: string;
   errorMessage?: string;
   createdAt: string;
   updatedAt: string;
@@ -245,6 +305,7 @@ export interface DatabaseSchema {
   lectures: LectureRecord[];
   actionItems: ActionItemRecord[];
   quizzes: QuizRecord[];
+  quizAttempts: QuizAttemptRecord[];
   flashcards: FlashcardRecord[];
   mindMaps: MindMapRecord[];
   notifications: NotificationRecord[];
@@ -252,6 +313,7 @@ export interface DatabaseSchema {
   jobs: JobRecord[];
   auditLogs: AuditRecord[];
   recordingSessions: RecordingSessionRecord[];
+  deletedResourceIds: string[];
 }
 
 function getInitialData(): DatabaseSchema {
@@ -310,14 +372,15 @@ function getInitialData(): DatabaseSchema {
     lectures: [buildAuthenticLectureRecord().lecture],
     actionItems: buildAuthenticLectureRecord().tasks,
     quizzes: [buildAuthenticLectureRecord().quiz],
-    flashcards: [],
-    mindMaps: [],
+    quizAttempts: [],
+    flashcards: buildAuthenticLectureRecord().flashcards,
+    mindMaps: [buildAuthenticLectureRecord().mindMap],
     notifications: [
       {
         id: `notif_authentic_ready`,
         userId: "usr_admin",
         title: "اكتمل تفريغ المحاضرة بدقة تامة",
-        body: 'تم تفريغ وتحليل "محاضرة: فقه التسامح وبناء الذات بين الدنيا والآخرة" (23:36) بنجاح 100% واستخراج الكويز والمهام.',
+        body: 'تم تفريغ وتحليل "محاضرة: فقه التسامح وبناء الذات بين الدنيا والآخرة" (23:36) بنجاح 100% واستخراج الكويز والمهام والبطاقات.',
         targetUrl: "/transcript",
         read: false,
         type: "summary",
@@ -327,6 +390,7 @@ function getInitialData(): DatabaseSchema {
     calendarEvents: [],
     jobs: [],
     recordingSessions: [],
+    deletedResourceIds: [],
     auditLogs: [
       {
         id: `aud_${Date.now()}`,
@@ -353,18 +417,30 @@ class DatabaseManager {
         const raw = fs.readFileSync(DB_FILE, "utf-8");
         const parsed: DatabaseSchema = JSON.parse(raw);
         if (!parsed.recordingSessions) parsed.recordingSessions = [];
-        // Ensure authentic graduation project lecture is present
-        if (!parsed.lectures.some((l) => l.id === authentic.lecture.id)) {
+        if (!parsed.quizAttempts) parsed.quizAttempts = [];
+        if (!parsed.deletedResourceIds) parsed.deletedResourceIds = [];
+        if (!parsed.flashcards) parsed.flashcards = [];
+        if (!parsed.mindMaps) parsed.mindMaps = [];
+
+        // Ensure authentic graduation project lecture is present UNLESS explicitly deleted
+        const isDeleted = parsed.deletedResourceIds.includes(authentic.lecture.id);
+        if (!isDeleted && !parsed.lectures.some((l) => l.id === authentic.lecture.id)) {
           parsed.lectures = [
             authentic.lecture,
             ...parsed.lectures.filter((l) => !l.title.includes("نظم التشغيل")),
           ];
         }
-        if (!parsed.quizzes.some((q) => q.lectureId === authentic.lecture.id)) {
+        if (!isDeleted && !parsed.quizzes.some((q) => q.lectureId === authentic.lecture.id)) {
           parsed.quizzes = [authentic.quiz, ...parsed.quizzes];
         }
-        if (!parsed.actionItems.some((a) => a.lectureId === authentic.lecture.id)) {
+        if (!isDeleted && !parsed.actionItems.some((a) => a.lectureId === authentic.lecture.id)) {
           parsed.actionItems = [...authentic.tasks, ...parsed.actionItems];
+        }
+        if (!isDeleted && parsed.flashcards.length === 0) {
+          parsed.flashcards = authentic.flashcards;
+        }
+        if (!isDeleted && parsed.mindMaps.length === 0) {
+          parsed.mindMaps = [authentic.mindMap];
         }
         this.saveData(parsed);
         return parsed;

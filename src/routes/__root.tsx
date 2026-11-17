@@ -7,19 +7,34 @@ import {
   HeadContent,
   Scripts,
 } from "@tanstack/react-router";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, lazy, Suspense, type ReactNode } from "react";
 
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import { Shell } from "@/components/layout/shell";
-import { CommandPalette } from "@/components/command/command-palette";
-import { FloatingAIAssistant } from "@/components/ai/floating-ai-assistant";
-import { NotificationCenter } from "@/components/notifications/notification-center";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ErrorState } from "@/components/error/error-state";
-import { UploadRecordingDialog } from "@/components/common/upload-recording-dialog";
 import { THEME_STORAGE_KEY, useUIStore } from "@/stores/ui-store";
+import { useI18nStore } from "@/lib/i18n";
+
+// Lazy-load heavy dialogs, floating tools and command palette to avoid blocking initial paint
+const UploadRecordingDialog = lazy(() =>
+  import("@/components/common/upload-recording-dialog").then((m) => ({
+    default: m.UploadRecordingDialog,
+  })),
+);
+const CommandPalette = lazy(() =>
+  import("@/components/command/command-palette").then((m) => ({ default: m.CommandPalette })),
+);
+const FloatingAIAssistant = lazy(() =>
+  import("@/components/ai/floating-ai-assistant").then((m) => ({ default: m.FloatingAIAssistant })),
+);
+const NotificationCenter = lazy(() =>
+  import("@/components/notifications/notification-center").then((m) => ({
+    default: m.NotificationCenter,
+  })),
+);
 
 function NotFoundComponent() {
   return (
@@ -31,12 +46,13 @@ function NotFoundComponent() {
   );
 }
 
-const THEME_INIT_SCRIPT = `(function(){try{var t=localStorage.getItem("${THEME_STORAGE_KEY}");var d=t==="dark"||(t!=="light"&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.classList.toggle("dark",d);}catch(e){document.documentElement.classList.add("dark");}})();`;
+const THEME_INIT_SCRIPT = `(function(){try{var t=localStorage.getItem("${THEME_STORAGE_KEY}");var d=t==="dark"||(t!=="light"&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.classList.toggle("dark",d);var l=localStorage.getItem("meetmind-lang");if(l==="AR"){document.documentElement.dir="rtl";document.documentElement.lang="ar";}}catch(e){document.documentElement.classList.add("dark");}})();`;
 
-function ErrorComponent({ error, reset }: { error: Error; reset: () => void }) {
+function ErrorComponent({ error: rawError, reset }: { error: unknown; reset: () => void }) {
   const router = useRouter();
   useEffect(() => {
     try {
+      const error = rawError instanceof Error ? rawError : new Error(String(rawError));
       if (import.meta.env.DEV) {
         const loc = router.state.location;
         console.groupCollapsed(
@@ -59,7 +75,7 @@ function ErrorComponent({ error, reset }: { error: Error; reset: () => void }) {
     } catch {
       // diagnostics must never throw
     }
-  }, [error, router]);
+  }, [rawError, router]);
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
@@ -123,12 +139,12 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       {
         property: "og:image",
         content:
-          "https://pub-bb2e103a32db4e198524a2e9ed8f35b4.r2.dev/aceb3af3-80b6-443f-9379-35855fdcdc46/id-preview-d8378394--38b00574-db81-4aa7-9abb-6747e45279cb.lovable.app-1783989468136.png",
+          "/assets/aistudio/_________________________________________________-1_a701650f.png",
       },
       {
         name: "twitter:image",
         content:
-          "https://pub-bb2e103a32db4e198524a2e9ed8f35b4.r2.dev/aceb3af3-80b6-443f-9379-35855fdcdc46/id-preview-d8378394--38b00574-db81-4aa7-9abb-6747e45279cb.lovable.app-1783989468136.png",
+          "/assets/aistudio/_________________________________________________-1_a701650f.png",
       },
     ],
     links: [
@@ -138,8 +154,15 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { rel: "preconnect", href: "https://fonts.googleapis.com" },
       { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
       {
+        rel: "preload",
+        as: "style",
+        href: "https://fonts.googleapis.com/css2?family=Aref+Ruqaa:wght@400;700&family=Inter:wght@400;500;600;700&display=swap",
+      },
+      {
         rel: "stylesheet",
-        href: "https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap",
+        href: "https://fonts.googleapis.com/css2?family=Aref+Ruqaa:wght@400;700&family=Inter:wght@400;500;600;700&display=swap",
+        media: "print",
+        onload: "this.media='all'",
       },
     ],
   }),
@@ -156,7 +179,7 @@ function RootShell({ children }: { children: ReactNode }) {
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
         <HeadContent />
       </head>
-      <body>
+      <body suppressHydrationWarning>
         {children}
         <Scripts />
       </body>
@@ -164,42 +187,63 @@ function RootShell({ children }: { children: ReactNode }) {
   );
 }
 
+import { useDataSync } from "@/lib/use-data-sync";
+
+function DataSyncListener() {
+  useDataSync();
+  return null;
+}
+
 function RootComponent() {
   const { queryClient } = Route.useRouteContext();
   const hydrateTheme = useUIStore((s) => s.hydrateTheme);
+  const hydrateUiLanguage = useUIStore((s) => s.hydrateLanguage);
   const resolvedTheme = useUIStore((s) => s.resolvedTheme);
   const language = useUIStore((s) => s.language);
   const recordingDialogOpen = useUIStore((s) => s.recordingDialogOpen);
   const setRecordingDialogOpen = useUIStore((s) => s.setRecordingDialogOpen);
+  const hydrateI18nLanguage = useI18nStore((s) => s.hydrateLanguage);
 
   useEffect(() => {
     hydrateTheme();
+    hydrateUiLanguage();
+    hydrateI18nLanguage();
+  }, [hydrateTheme, hydrateUiLanguage, hydrateI18nLanguage]);
+
+  useEffect(() => {
     if (typeof document !== "undefined") {
       document.documentElement.dir = language === "AR" ? "rtl" : "ltr";
       document.documentElement.lang = language === "AR" ? "ar" : "en";
     }
-  }, [hydrateTheme, language]);
+  }, [language]);
 
   return (
     <QueryClientProvider client={queryClient}>
+      <DataSyncListener />
       <TooltipProvider delayDuration={200}>
         <Shell>
           <Outlet />
         </Shell>
-        <CommandPalette />
-        <NotificationCenter />
-        <FloatingAIAssistant />
+        <Suspense fallback={null}>
+          <CommandPalette />
+          <NotificationCenter />
+          <FloatingAIAssistant />
+        </Suspense>
         <Toaster position="top-right" richColors theme={resolvedTheme} />
-        <UploadRecordingDialog
-          open={recordingDialogOpen}
-          onOpenChange={setRecordingDialogOpen}
-          onSuccess={() => {
-            queryClient.invalidateQueries({ queryKey: ["meetings"] });
-            queryClient.invalidateQueries({ queryKey: ["lectures"] });
-            queryClient.invalidateQueries({ queryKey: ["dashboard-metrics"] });
-            queryClient.invalidateQueries({ queryKey: ["transcripts"] });
-          }}
-        />
+        {recordingDialogOpen && (
+          <Suspense fallback={null}>
+            <UploadRecordingDialog
+              open={recordingDialogOpen}
+              onOpenChange={setRecordingDialogOpen}
+              onSuccess={() => {
+                queryClient.invalidateQueries({ queryKey: ["meetings"] });
+                queryClient.invalidateQueries({ queryKey: ["lectures"] });
+                queryClient.invalidateQueries({ queryKey: ["dashboardMetrics"] });
+                queryClient.invalidateQueries({ queryKey: ["transcripts"] });
+              }}
+            />
+          </Suspense>
+        )}
       </TooltipProvider>
     </QueryClientProvider>
   );

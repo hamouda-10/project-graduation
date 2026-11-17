@@ -11,11 +11,39 @@ export interface AnalysisRecord {
     priority?: string;
   }[];
   emphasizedPoints?: string[];
-  importantSentences?: string[];
+  importantSentences?: (string | { quote: string; context?: string; timestamp?: string })[];
   reviewAreas?: string[];
   keyPoints?: string[];
   decisions?: string[];
   topics?: string[];
+}
+
+export interface KeywordItem {
+  term: string;
+  frequency: number;
+  importance: number;
+  segmentIds?: string[];
+}
+
+export interface HighlightItem {
+  quote: string;
+  context?: string;
+  speaker?: string;
+  timestamp: string;
+  category: string;
+  priority: string;
+}
+
+export interface TranscriptSegmentItem {
+  id: string;
+  speaker: string;
+  startTime: number;
+  endTime: number;
+  text: string;
+  confidence?: number;
+  language?: string;
+  isPartial?: boolean;
+  chunkIndex?: number;
 }
 
 export interface Meeting {
@@ -28,21 +56,20 @@ export interface Meeting {
   durationSeconds: number;
   participantsCount: number;
   status: "Completed" | "Processing" | "Queued" | "Failed";
+  language?: string;
   recordingPath?: string;
   recordingFileName?: string;
   audioUrl?: string;
   summary?: string;
+  executiveSummary?: string;
+  detailedSummary?: string;
   keyPoints?: string[];
   decisions?: string[];
   topics?: string[];
+  keywords?: KeywordItem[];
+  highlights?: HighlightItem[];
   analysis?: AnalysisRecord;
-  segments: {
-    id: string;
-    speaker: string;
-    startTime: number;
-    endTime: number;
-    text: string;
-  }[];
+  segments: TranscriptSegmentItem[];
 }
 
 export interface Lecture {
@@ -55,21 +82,21 @@ export interface Lecture {
   date: string;
   durationSeconds: number;
   status: "Completed" | "Processing" | "Queued" | "Failed";
+  language?: string;
   recordingPath?: string;
   recordingFileName?: string;
   audioUrl?: string;
+  summary?: string;
+  executiveSummary?: string;
+  detailedSummary?: string;
   studyNotes?: string;
   keyConcepts?: { term: string; definition: string }[];
   examHighlights?: string[];
   topics?: string[];
+  keywords?: KeywordItem[];
+  highlights?: HighlightItem[];
   analysis?: AnalysisRecord;
-  segments: {
-    id: string;
-    speaker: string;
-    startTime: number;
-    endTime: number;
-    text: string;
-  }[];
+  segments: TranscriptSegmentItem[];
 }
 
 export interface ActionItem {
@@ -87,9 +114,27 @@ export interface ActionItem {
 export interface QuizQuestion {
   id: string;
   question: string;
+  type?: "multiple_choice" | "true_false" | "short_answer" | "fill_in_the_blank";
   options: string[];
   correctOptionIndex: number;
+  correctAnswerText?: string;
+  acceptableAnswers?: string[];
   explanation: string;
+  difficulty?: "easy" | "medium" | "hard";
+  sectionRef?: string;
+  timestampRef?: string;
+}
+
+export interface QuizAttempt {
+  id: string;
+  quizId: string;
+  lectureId?: string;
+  userId: string;
+  scorePercent: number;
+  correctCount: number;
+  totalQuestions: number;
+  answers: Record<string, string | number>;
+  submittedAt: string;
 }
 
 export interface Quiz {
@@ -152,12 +197,28 @@ export interface CalendarEvent {
 export interface DashboardMetrics {
   totalMeetings: number;
   totalLectures: number;
+  totalAudioDurationSeconds?: number;
+  totalAudioHours?: number;
+  totalTranscripts?: number;
+  totalSummaries?: number;
+  totalQuizzes?: number;
+  totalQuizAttempts?: number;
   completedTasks: number;
   pendingTasks: number;
   processingJobs: number;
+  hoursSaved?: number;
   recentMeetings: Meeting[];
   recentLectures: Lecture[];
   tasks: ActionItem[];
+}
+
+export interface Job {
+  id: string;
+  status: string;
+  progressPercent: number;
+  resourceType: string;
+  resourceId: string;
+  errorMessage?: string;
 }
 
 export interface DashboardTrends {
@@ -167,32 +228,124 @@ export interface DashboardTrends {
 
 export interface GroundedAnswer {
   answer: string;
+  evidenceFound?: boolean;
   citations: { speaker: string; timestamp: string; quote: string }[];
   suggestedFollowUps?: string[];
 }
 
-class ApiClient {
-  private async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
-    const res = await fetch(endpoint, {
-      ...options,
-      headers: {
-        "Content-Type": "application/json",
-        ...options.headers,
-      },
-    });
+function sanitizeAsciiHeaderValue(value: string): string {
+  // HTTP fetch headers only permit ISO-8859-1 / ASCII bytes; strip non-ASCII code points defensively
+  let out = "";
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code >= 0x20 && code <= 0x7e) {
+      out += value[i];
+    }
+  }
+  return out.trim();
+}
 
-    if (!res.ok) {
-      let msg = `HTTP error ${res.status}`;
-      try {
-        const errorJson = await res.json();
-        if (errorJson.error) msg = errorJson.error;
-      } catch {
-        // ignore
-      }
-      throw new Error(msg);
+function createAsciiRequestId(): string {
+  return `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+class ApiClient {
+  private buildHeaders(
+    extra?: HeadersInit,
+    options?: { isFormData?: boolean },
+  ): Record<string, string> {
+    const headers: Record<string, string> = {
+      Accept: "application/json",
+      "X-Request-ID": createAsciiRequestId(),
+    };
+
+    if (!options?.isFormData) {
+      headers["Content-Type"] = "application/json";
     }
 
-    return res.json() as Promise<T>;
+    try {
+      const token =
+        typeof window !== "undefined"
+          ? localStorage.getItem("meetmind_token") || sessionStorage.getItem("meetmind_token")
+          : null;
+      if (token) {
+        const cleanToken = sanitizeAsciiHeaderValue(token);
+        if (cleanToken) headers["Authorization"] = `Bearer ${cleanToken}`;
+      }
+    } catch {
+      // ignore storage restrictions
+    }
+
+    if (extra) {
+      const pairs =
+        extra instanceof Headers
+          ? Array.from(extra.entries())
+          : Array.isArray(extra)
+            ? extra
+            : Object.entries(extra);
+      for (const [key, val] of pairs) {
+        if (options?.isFormData && key.toLowerCase() === "content-type") {
+          continue;
+        }
+        const cleanKey = sanitizeAsciiHeaderValue(key);
+        const cleanVal = sanitizeAsciiHeaderValue(String(val));
+        if (cleanKey && cleanVal) {
+          headers[cleanKey] = cleanVal;
+        }
+      }
+    }
+
+    return headers;
+  }
+
+  private async request<T>(
+    endpoint: string,
+    options: RequestInit & { timeoutMs?: number; retries?: number } = {},
+  ): Promise<T> {
+    const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
+    const timeoutMs = options.timeoutMs ?? 60000;
+    const method = (options.method || "GET").toUpperCase();
+    const maxRetries = options.retries ?? (method === "GET" ? 1 : 0);
+
+    let lastError: Error | null = null;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const controller = new AbortController();
+      const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+
+      try {
+        const res = await fetch(endpoint, {
+          ...options,
+          headers: this.buildHeaders(options.headers, { isFormData }),
+          signal: options.signal || controller.signal,
+        });
+
+        clearTimeout(timeoutHandle);
+
+        if (!res.ok) {
+          let msg = `HTTP error ${res.status}`;
+          try {
+            const errorJson = await res.json();
+            if (errorJson?.error) msg = errorJson.error;
+            else if (errorJson?.detail) msg = errorJson.detail;
+          } catch {
+            // ignore parse errors
+          }
+          throw new Error(msg);
+        }
+
+        return (await res.json()) as Promise<T>;
+      } catch (err) {
+        clearTimeout(timeoutHandle);
+        lastError = err instanceof Error ? err : new Error("Network request failed");
+        if (attempt < maxRetries) {
+          await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
+          continue;
+        }
+      }
+    }
+
+    throw lastError || new Error("Request failed");
   }
 
   // Dashboard
@@ -232,8 +385,14 @@ class ApiClient {
     });
   }
 
-  async deleteMeeting(id: string): Promise<{ success: boolean }> {
-    return this.request<{ success: boolean }>(`/api/v1/meetings/${id}`, {
+  async deleteMeeting(id: string): Promise<{ success: boolean; id: string }> {
+    return this.request<{ success: boolean; id: string }>(`/api/v1/meetings/${id}`, {
+      method: "DELETE",
+    });
+  }
+
+  async deleteAllMeetings(): Promise<{ success: boolean; count: number }> {
+    return this.request<{ success: boolean; count: number }>("/api/v1/meetings/all", {
       method: "DELETE",
     });
   }
@@ -260,38 +419,65 @@ class ApiClient {
     });
   }
 
-  async deleteLecture(id: string): Promise<{ success: boolean }> {
-    return this.request<{ success: boolean }>(`/api/v1/lectures/${id}`, {
+  async deleteLecture(id: string): Promise<{ success: boolean; id: string }> {
+    return this.request<{ success: boolean; id: string }>(`/api/v1/lectures/${id}`, {
       method: "DELETE",
     });
   }
 
-  // Upload recording
-  async uploadRecording(formData: FormData): Promise<{
+  async deleteAllLectures(): Promise<{ success: boolean; count: number }> {
+    return this.request<{ success: boolean; count: number }>("/api/v1/lectures/all", {
+      method: "DELETE",
+    });
+  }
+
+  // Upload recording (uses centralized request builder so Content-Type boundary is auto-set & headers are pure ASCII)
+  async uploadRecording(
+    formData: FormData,
+    idempotencyKey?: string,
+  ): Promise<{
     message: string;
     jobId: string;
     resourceId: string;
     resourceType: string;
+    deduplicated?: boolean;
   }> {
-    const res = await fetch("/api/v1/recordings/upload", {
-      method: "POST",
-      body: formData,
-    });
-    if (!res.ok) {
-      throw new Error("Failed to upload recording");
+    const extraHeaders: Record<string, string> = {};
+    if (idempotencyKey) {
+      const safeKey = sanitizeAsciiHeaderValue(idempotencyKey);
+      if (safeKey) extraHeaders["Idempotency-Key"] = safeKey;
     }
-    return res.json();
+    return this.request("/api/v1/recordings/upload", {
+      method: "POST",
+      headers: extraHeaders,
+      body: formData,
+      timeoutMs: 300000,
+    });
+  }
+
+  async deleteAllRecordings(): Promise<{ success: boolean; deletedCount: number }> {
+    return this.request<{ success: boolean; deletedCount: number }>("/api/v1/recordings/all", {
+      method: "DELETE",
+    });
+  }
+
+  async reprocessRecording(
+    id: string,
+  ): Promise<{ success: boolean; jobId: string; resourceId: string; status: string }> {
+    return this.request(`/api/v1/recordings/${id}/reprocess`, {
+      method: "POST",
+    });
   }
 
   // Jobs
-  async getJob(id: string): Promise<{
-    id: string;
-    status: string;
-    progressPercent: number;
-    resourceType: string;
-    resourceId: string;
-  }> {
+  async getJob(id: string): Promise<Job> {
     return this.request(`/api/v1/jobs/${id}`);
+  }
+
+  async cancelJob(id: string): Promise<{ success: boolean; job: Job }> {
+    return this.request<{ success: boolean; job: Job }>(`/api/v1/jobs/${id}/cancel`, {
+      method: "POST",
+    });
   }
 
   // Transcripts
@@ -299,15 +485,74 @@ class ApiClient {
     id: string;
     title: string;
     type: string;
-    segments: Meeting["segments"];
+    segments: TranscriptSegmentItem[];
+    keywords?: KeywordItem[];
+    highlights?: HighlightItem[];
   }> {
     return this.request(`/api/v1/transcripts/${id}`);
   }
 
-  async updateTranscript(id: string, segments: Meeting["segments"]): Promise<{ success: boolean }> {
+  async updateTranscript(
+    id: string,
+    segments: TranscriptSegmentItem[],
+  ): Promise<{ success: boolean }> {
     return this.request(`/api/v1/transcripts/${id}`, {
       method: "PUT",
       body: JSON.stringify({ segments }),
+    });
+  }
+
+  async renameSpeaker(
+    id: string,
+    speakerMap: Record<string, string>,
+  ): Promise<{ success: boolean; updatedSegments: number; segments: TranscriptSegmentItem[] }> {
+    return this.request(`/api/v1/transcripts/${id}/speakers`, {
+      method: "PUT",
+      body: JSON.stringify({ speakerMap }),
+    });
+  }
+
+  getTranscriptExportUrl(id: string, format: "html" | "txt" = "html"): string {
+    return `/api/v1/transcripts/${encodeURIComponent(id)}/export?format=${encodeURIComponent(format)}`;
+  }
+
+  async exportTranscriptHtml(id: string): Promise<string> {
+    const res = await fetch(this.getTranscriptExportUrl(id, "html"), {
+      headers: this.buildHeaders({ Accept: "text/html" }, { isFormData: true }),
+    });
+    if (!res.ok) throw new Error("Failed to render export");
+    return res.text();
+  }
+
+  async getSyncStatus(): Promise<{ type: string; id?: string; timestamp: number }> {
+    return this.request("/api/v1/sync/status");
+  }
+
+  async sendLiveChunk(data: {
+    recordingId: string | null;
+    audioBase64: string;
+    mimeType: string;
+    chunkIndex: number;
+    startTime: number;
+    endTime: number;
+    speaker: string;
+    language: string;
+    interimText?: string;
+    recentContext?: string;
+  }): Promise<{
+    success: boolean;
+    chunkIndex: number;
+    startTime: number;
+    endTime: number;
+    speaker: string;
+    arabicText?: string;
+    text?: string;
+    detectedLanguage?: string;
+    savedToDb?: boolean;
+  }> {
+    return this.request("/api/v1/transcripts/live-chunk", {
+      method: "POST",
+      body: JSON.stringify(data),
     });
   }
 
@@ -364,7 +609,8 @@ class ApiClient {
     type: "meeting" | "lecture";
     title: string;
     courseCode?: string;
-    segments?: Meeting["segments"];
+    language?: string;
+    segments?: TranscriptSegmentItem[];
     durationSeconds: number;
     audioBase64?: string;
   }): Promise<{
@@ -434,18 +680,39 @@ class ApiClient {
     return this.request<Quiz[]>("/api/v1/quizzes");
   }
 
+  async generateNewQuiz(
+    lectureId: string,
+    options?: { avoidQuestionTitles?: string[]; variant?: number },
+  ): Promise<Quiz> {
+    return this.request<Quiz>("/api/v1/quizzes/generate", {
+      method: "POST",
+      body: JSON.stringify({ lectureId, ...options }),
+    });
+  }
+
+  async getQuizAttempts(quizId?: string): Promise<QuizAttempt[]> {
+    const url = quizId
+      ? `/api/v1/quizzes/attempts?quizId=${encodeURIComponent(quizId)}`
+      : "/api/v1/quizzes/attempts";
+    return this.request<QuizAttempt[]>(url);
+  }
+
   async submitQuizAttempt(
     quizId: string,
-    answers: Record<string, number>,
+    answers: Record<string, string | number>,
   ): Promise<{
     quizId: string;
+    attemptId?: string;
     totalQuestions: number;
     correctCount: number;
     scorePercent: number;
     results: {
       questionId: string;
-      chosenOptionIndex: number;
+      type: string;
+      userAnswer: string | number;
+      chosenOptionIndex?: number;
       correctOptionIndex: number;
+      correctAnswerText?: string;
       isCorrect: boolean;
       explanation: string;
     }[];
@@ -461,6 +728,16 @@ class ApiClient {
     return this.request<Flashcard[]>("/api/v1/flashcards");
   }
 
+  async generateFlashcards(params?: {
+    lectureId?: string;
+    meetingId?: string;
+  }): Promise<Flashcard[]> {
+    return this.request<Flashcard[]>("/api/v1/flashcards/generate", {
+      method: "POST",
+      body: JSON.stringify(params || {}),
+    });
+  }
+
   async updateFlashcard(id: string, updates: Partial<Flashcard>): Promise<Flashcard> {
     return this.request<Flashcard>(`/api/v1/flashcards/${id}`, {
       method: "PUT",
@@ -471,6 +748,13 @@ class ApiClient {
   // Mind maps
   async getMindMaps(): Promise<MindMap[]> {
     return this.request<MindMap[]>("/api/v1/mindmaps");
+  }
+
+  async generateMindMap(params?: { lectureId?: string; meetingId?: string }): Promise<MindMap> {
+    return this.request<MindMap>("/api/v1/mindmaps/generate", {
+      method: "POST",
+      body: JSON.stringify(params || {}),
+    });
   }
 
   // Calendar
@@ -526,7 +810,14 @@ class ApiClient {
     meetings: Meeting[];
     lectures: Lecture[];
     tasks: ActionItem[];
-    transcripts: { id: string; title: string; quote: string; time: number }[];
+    transcripts: {
+      id: string;
+      title: string;
+      quote: string;
+      time: number;
+      type?: "meeting" | "lecture";
+      courseCode?: string;
+    }[];
   }> {
     return this.request(`/api/v1/search?q=${encodeURIComponent(query)}`);
   }
@@ -554,19 +845,6 @@ class ApiClient {
     return this.request("/api/v1/users", {
       method: "POST",
       body: JSON.stringify(data),
-    });
-  }
-
-  // Deletion operations with physical file and data cascade
-  async deleteMeeting(id: string): Promise<{ success: boolean; id: string }> {
-    return this.request<{ success: boolean; id: string }>(`/api/v1/meetings/${id}`, {
-      method: "DELETE",
-    });
-  }
-
-  async deleteLecture(id: string): Promise<{ success: boolean; id: string }> {
-    return this.request<{ success: boolean; id: string }>(`/api/v1/lectures/${id}`, {
-      method: "DELETE",
     });
   }
 
@@ -614,9 +892,7 @@ class ApiClient {
   }
 
   async getSystemBackup(): Promise<Record<string, unknown>> {
-    const res = await fetch("/api/v1/system/backup");
-    if (!res.ok) throw new Error("Failed to download system backup");
-    return res.json();
+    return this.request<Record<string, unknown>>("/api/v1/system/backup");
   }
 
   async restoreSystem(

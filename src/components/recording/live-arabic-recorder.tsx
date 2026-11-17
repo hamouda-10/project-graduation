@@ -67,6 +67,7 @@ export function LiveArabicRecorder({
   );
   const [courseCode, setCourseCode] = useState("CS 6410");
   const [speakerName, setSpeakerName] = useState("المتحدث 1");
+  const [selectedLanguage, setSelectedLanguage] = useState<string>("auto");
   const [autoScroll, setAutoScroll] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [viewMode, setViewMode] = useState<"continuous" | "cards">("continuous");
@@ -85,16 +86,17 @@ export function LiveArabicRecorder({
     detectedLanguage,
     isProcessingChunk,
     audioLevels,
-    error,
     startRecording,
     togglePause,
     stopRecording,
+    cancelRecording,
     setSegments,
   } = useLiveTranscription({
     type,
     title,
     courseCode,
     speakerName,
+    language: selectedLanguage,
     chunkDurationMs: 3500,
     onError: (err) => toast.error(err),
   });
@@ -229,14 +231,14 @@ export function LiveArabicRecorder({
           </div>
 
           <DialogDescription className="text-xs text-muted-foreground text-right leading-relaxed">
-            يتحدث المشاركون بالإنجليزية أو العربية أو اللهجة المصرية، وتقوم المنصة فورياً بتحويل
-            الكلام إلى نص عربي معتمد بالكامل وبشكل متزامن أثناء التحدث.
+            يدعم التسجيل المباشر اللغة العربية والإنجليزية والمحتوى الهجين، مع تفريغ متزامن وحفظ
+            تلقائي فوري للمقاطع المعتمدة.
           </DialogDescription>
         </DialogHeader>
 
         {/* Configuration Bar (When not recording) */}
         {!isRecording && (
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 py-2 text-right">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 py-2 text-right">
             <div className="space-y-1">
               <label className="text-[11px] font-medium text-muted-foreground">نوع الجلسة</label>
               <Select value={type} onValueChange={(v: "meeting" | "lecture") => setType(v)}>
@@ -246,6 +248,22 @@ export function LiveArabicRecorder({
                 <SelectContent>
                   <SelectItem value="meeting">اجتماع عمل (Business Meeting)</SelectItem>
                   <SelectItem value="lecture">محاضرة تعليمية (Lecture)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-[11px] font-medium text-muted-foreground">لغة التفريغ</label>
+              <Select value={selectedLanguage} onValueChange={setSelectedLanguage}>
+                <SelectTrigger className="h-8 text-xs bg-background/60">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="auto">Auto-Detect</SelectItem>
+                  <SelectItem value="ar-EG">العربية (مصر)</SelectItem>
+                  <SelectItem value="ar-SA">العربية الفصحى</SelectItem>
+                  <SelectItem value="en">English (US)</SelectItem>
+                  <SelectItem value="mixed">Mixed (AR/EN)</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -313,6 +331,22 @@ export function LiveArabicRecorder({
                   title={isPaused ? "استئناف" : "إيقاف مؤقت"}
                 >
                   {isPaused ? <Play className="h-4 w-4 ml-0.5" /> : <Pause className="h-4 w-4" />}
+                </Button>
+
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={async () => {
+                    await cancelRecording();
+                    toast.info("تم إلغاء الجلسة المباشرة وتجاهل المقطع المؤقت");
+                    onOpenChange(false);
+                  }}
+                  disabled={isFinishing}
+                  className="h-9 px-3 text-xs text-muted-foreground hover:text-destructive cursor-pointer gap-1"
+                  title="إلغاء وتجاهل التسجيل"
+                >
+                  <X className="h-4 w-4" />
+                  إلغاء
                 </Button>
               </div>
             )}
@@ -429,8 +463,8 @@ export function LiveArabicRecorder({
                   : "انقر على زر 'بدء التسجيل المباشر' للبدء في التحدث"}
               </p>
               <p className="text-xs text-muted-foreground max-w-md">
-                تحدث بالإنجليزية أو العربية الفصحى أو اللهجة المصرية، وسيظهر النص هنا مباشرة باللغة
-                العربية بدون أي كلمات إنجليزية.
+                تحدث بلغتك المختارة (عربي، إنجليزي، أو هجين) وسيظهر التفريغ مباشرة هنا مع التمييز
+                بين النص المؤقت والنص المعتمد.
               </p>
             </div>
           )}
@@ -486,6 +520,16 @@ export function LiveArabicRecorder({
                       </div>
 
                       <div className="flex items-center gap-2">
+                        <Badge
+                          variant="outline"
+                          className={`text-[10px] ${
+                            seg.isFinal
+                              ? "border-emerald-500/40 text-emerald-400 bg-emerald-500/10"
+                              : "border-amber-500/40 text-amber-400 bg-amber-500/10"
+                          }`}
+                        >
+                          {seg.isFinal ? "معتمد · Final" : "مؤقت · Partial"}
+                        </Badge>
                         <span className="font-mono text-[11px] bg-background/60 px-1.5 py-0.5 rounded text-foreground/80">
                           [{formatTimer(seg.startTime)} - {formatTimer(seg.endTime)}]
                         </span>

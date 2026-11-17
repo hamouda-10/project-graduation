@@ -1,69 +1,66 @@
 import { cn } from "@/lib/utils";
 
-export function Logo({
-  className,
-  compact = false,
-  variant = "gold",
-}: {
-  className?: string;
-  compact?: boolean;
-  variant?: "gold" | "white";
-}) {
+/**
+ * MeetMind AI Logo
+ * Features:
+ * - Direct official logo asset
+ * - Border Radius 40px
+ * - Slightly reduced logo size for refined sidebar balance
+ * - Encased in an animated rotating gold highlight frame
+ * - Crisp rendering without cropping
+ */
+export function Logo({ className, compact = false }: { className?: string; compact?: boolean }) {
   return (
-    <div className={cn("flex items-center gap-3", className)}>
-      {/* Custom Stylized M + Microphone Gold Emblem */}
-      <div className="relative grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-zinc-950 border border-amber-500/40 shadow-lg shadow-amber-500/10 transition-transform hover:scale-105">
-        <svg viewBox="0 0 64 64" className="h-6 w-6" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <defs>
-            <linearGradient id="logoGold" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#FDE68A" />
-              <stop offset="45%" stopColor="#F59E0B" />
-              <stop offset="100%" stopColor="#D97706" />
-            </linearGradient>
-          </defs>
-          {/* M Left Pillar */}
-          <path
-            d="M16 44 L16 22 L24 33"
-            stroke="url(#logoGold)"
-            strokeWidth="3.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-          {/* M Right Pillar */}
-          <path
-            d="M48 44 L48 22 L40 33"
-            stroke="url(#logoGold)"
-            strokeWidth="3.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-          {/* Central Microphone Capsule */}
-          <rect x="27.5" y="16" width="9" height="15" rx="4.5" fill="url(#logoGold)" />
-          {/* Microphone Cradle Arc */}
-          <path
-            d="M24 25 C24 33.5 40 33.5 40 25"
-            stroke="url(#logoGold)"
-            strokeWidth="2.5"
-            strokeLinecap="round"
-          />
-          <path d="M32 33 L32 38" stroke="url(#logoGold)" strokeWidth="2.5" strokeLinecap="round" />
-          <path d="M27 38 L37 38" stroke="url(#logoGold)" strokeWidth="2.5" strokeLinecap="round" />
-          {/* Intelligent Sparkle Dot */}
-          <circle cx="32" cy="45" r="2" fill="#FDE68A" />
-        </svg>
-        <span className="pointer-events-none absolute inset-0 rounded-xl ring-1 ring-amber-400/20" />
+    <div
+      className={cn(
+        "flex flex-col items-center justify-center select-none transition-all duration-200",
+        compact ? "gap-0" : "gap-2.5",
+        className,
+      )}
+    >
+      {/* Multi-Orbital Atomic Gold Rings Behind Official Logo */}
+      <div className="logo-orbit-wrapper">
+        <div className="logo-orbit-rings-group" aria-hidden="true">
+          <div className="logo-orbit-ring logo-orbit-ring-1" />
+          <div className="logo-orbit-ring logo-orbit-ring-2" />
+          <div className="logo-orbit-ring logo-orbit-ring-3" />
+          <div className="logo-orbit-ring logo-orbit-ring-4" />
+          <div className="logo-orbit-ring logo-orbit-ring-5" />
+        </div>
+
+        {/* Animated Rotating Gold Highlight Frame with Border Radius 40px (z-10) */}
+        <div className="gold-animated-border relative z-10 transition-transform duration-200 hover:scale-105">
+          <div className="gold-animated-border-inner">
+            <div
+              className={cn(
+                "relative grid place-items-center shrink-0 overflow-hidden rounded-[30px]",
+                compact ? "h-8 w-8" : "h-12 w-12 sm:h-13 sm:w-13",
+              )}
+              style={{ borderRadius: "30px" }}
+            >
+              <picture>
+                <source srcSet="/assets/meetmind_logo.webp" type="image/webp" />
+                <img
+                  src="/assets/aistudio/______________________________2c404761.png"
+                  alt="MeetMind AI Logo"
+                  className="h-full w-full object-contain aspect-square select-none rounded-[40px]"
+                  style={{ borderRadius: "40px" }}
+                  loading="eager"
+                  decoding="async"
+                />
+              </picture>
+            </div>
+          </div>
+        </div>
       </div>
 
       {!compact && (
-        <div className="min-w-0 leading-tight text-right">
-          <div className="truncate font-display text-base font-bold tracking-tight text-foreground flex items-center gap-1">
-            <span>MeetMind</span>
-            <span className="text-transparent bg-clip-text bg-gradient-to-r from-amber-400 via-amber-300 to-amber-500 font-black">
+        <div className="flex flex-col items-center justify-center text-center leading-none">
+          <div className="font-display text-lg sm:text-xl font-black tracking-tight text-foreground flex items-center justify-center gap-1.5">
+            <span className="font-extrabold text-white drop-shadow-sm">MeetMind</span>
+            <span className="text-transparent bg-clip-text bg-gradient-to-r from-amber-300 via-amber-400 to-amber-500 font-black">
               AI
             </span>
-          </div>
-          <div className="truncate text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
-            ذكاء الاجتماعات والمحاضرات
           </div>
         </div>
       )}

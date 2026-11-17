@@ -2,6 +2,8 @@ import type { ReactNode } from "react";
 import { AppSidebar } from "@/components/layout/app-sidebar";
 import { Topbar } from "@/components/layout/topbar";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
+import { AmbientBackground } from "@/components/common/ambient-background";
+import { PerformanceMonitor } from "@/components/common/performance-monitor";
 import { useUIStore } from "@/stores/ui-store";
 import { useTranslation } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
@@ -12,12 +14,12 @@ export function Shell({ children }: { children: ReactNode }) {
   const { isRtl } = useTranslation();
 
   return (
-    <div className="relative flex min-h-screen w-full bg-background text-foreground">
-      <div className="pointer-events-none fixed inset-0 mesh-bg opacity-60" aria-hidden />
-      <div
-        className="pointer-events-none fixed inset-0 bg-[radial-gradient(ellipse_at_top,transparent_60%,var(--color-background)_100%)]"
-        aria-hidden
-      />
+    <div className="relative flex min-h-screen w-full bg-background text-foreground selection:bg-primary/20 selection:text-primary">
+      {/* High-performance pure SVG/CSS ambient background */}
+      <AmbientBackground />
+
+      {/* Real-time speed & TTFB/FCP/LCP HUD */}
+      <PerformanceMonitor />
 
       <div className="relative z-10 hidden lg:block">
         <div className="sticky top-0 h-screen">
@@ -29,7 +31,7 @@ export function Shell({ children }: { children: ReactNode }) {
         <SheetContent
           side={isRtl ? "right" : "left"}
           className={cn(
-            "w-[280px] bg-sidebar/95 p-0",
+            "w-[220px] bg-sidebar/95 p-0 backdrop-blur-xl border-border/70",
             isRtl ? "border-l border-sidebar-border" : "border-r border-sidebar-border",
           )}
         >

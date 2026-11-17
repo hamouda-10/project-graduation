@@ -1,4 +1,4 @@
-import { db, TranscriptSegment } from "./db";
+import { db, TranscriptSegment, MindMapNode } from "./db";
 import { getGeminiClient } from "./gemini";
 
 export interface AIAnalysisResult {
@@ -30,50 +30,296 @@ export interface AIAnalysisResult {
   }[];
 }
 
-// Common technical English terms mapped to accurate Arabic counterparts
-const TECHNICAL_TERMS_MAP: Record<string, string> = {
-  api: "واجهة برمجة التطبيقات",
-  apis: "واجهات برمجة التطبيقات",
-  latency: "زمن الاستجابة",
-  database: "قاعدة البيانات",
-  microservices: "الخدمات المصغرة",
-  frontend: "الواجهة الأمامية",
-  backend: "الواجهة الخلفية",
-  server: "الخادم",
-  servers: "الخوادم",
-  cloud: "السحابة",
-  deploy: "نشر وتطبيق",
-  deployment: "النشر",
-  cache: "الذاكرة المؤقتة",
-  caching: "التخزين المؤقت",
-  consensus: "التوافق الموزع",
-  raft: "بروتوكول رافت",
-  paxos: "بروتوكول باكسوس",
-  leader: "القائد",
-  follower: "التابع",
-  quorum: "النصاب القانوني",
-  replica: "النسخة المتطابقة",
-  replicas: "النسخ المتطابقة",
-  partition: "انقسام الشبكة",
-  network: "الشبكة",
-  bandwidth: "عرض النطاق الترددي",
-  algorithm: "الخوارزمية",
-  algorithms: "الخوارزميات",
-  throughput: "معدل تدفق البيانات",
-  load: "الحمل",
-  balancer: "موازن الأحمال",
-  architecture: "الهندسة المعمارية للنظام",
-  security: "الأمان وحماية البيانات",
-  encryption: "التشفير",
-};
+const AI_SERVICE_URL = process.env.AI_SERVICE_URL?.replace(/\/$/, "");
+
+export function extractKeywordsWithFrequency(
+  segments: TranscriptSegment[],
+  limit = 10,
+): Array<{ term: string; frequency: number; importance: number; segmentIds: string[] }> {
+  const stopWords = new Set([
+    "في",
+    "من",
+    "على",
+    "إلى",
+    "عن",
+    "مع",
+    "هذا",
+    "هذه",
+    "ذلك",
+    "تم",
+    "كان",
+    "يكون",
+    "كل",
+    "هو",
+    "هي",
+    "نحن",
+    "أن",
+    "إن",
+    "هل",
+    "ما",
+    "التي",
+    "الذي",
+    "بين",
+    "عند",
+    "the",
+    "and",
+    "for",
+    "with",
+    "that",
+    "this",
+    "from",
+    "are",
+    "was",
+    "were",
+    "have",
+    "has",
+    "will",
+    "about",
+    "into",
+    "your",
+    "they",
+    "their",
+    "what",
+    "when",
+  ]);
+  const counts = new Map<string, { freq: number; segIds: Set<string> }>();
+  for (const seg of segments) {
+    const tokens = (seg.text || "").split(/\s+/);
+    for (const raw of tokens) {
+      const clean = raw.replace(/[^ء-يa-zA-Z0-9_-]/g, "");
+      const norm = clean.toLowerCase();
+      if (clean.length >= 3 && !stopWords.has(norm)) {
+        const entry = counts.get(clean) || { freq: 0, segIds: new Set<string>() };
+        entry.freq += 1;
+        entry.segIds.add(seg.id);
+        counts.set(clean, entry);
+      }
+    }
+  }
+  const sorted = Array.from(counts.entries())
+    .sort((a, b) => b[1].freq - a[1].freq)
+    .slice(0, limit);
+  const maxFreq = Math.max(1, sorted[0]?.[1].freq || 1);
+  return sorted.map(([term, info]) => ({
+    term,
+    frequency: info.freq,
+    importance: Math.round((info.freq / maxFreq) * 100) / 100,
+    segmentIds: Array.from(info.segIds),
+  }));
+}
+
+export function extractHighlightsFromSegments(segments: TranscriptSegment[]): Array<{
+  quote: string;
+  context?: string;
+  speaker?: string;
+  timestamp: string;
+  category: string;
+  priority: string;
+}> {
+  const cues: Array<{ regex: RegExp; category: string; priority: string }> = [
+    {
+      regex: /(important|critical|exam|remember|key|note|مهم|امتحان|انتبه|أساسي|تذكر)/i,
+      category: "ExamTip",
+      priority: "high",
+    },
+    {
+      regex: /(decide|decision|agreed|approved|قرر|اتفق|اعتماد)/i,
+      category: "Decision",
+      priority: "high",
+    },
+    {
+      regex: /(warning|risk|danger|careful|تحذير|خطر|مشكلة)/i,
+      category: "Warning",
+      priority: "high",
+    },
+    {
+      regex: /(defined as|means|definition|يعني|تعريف|المقصود)/i,
+      category: "Definition",
+      priority: "medium",
+    },
+  ];
+  const results: Array<{
+    quote: string;
+    context?: string;
+    speaker?: string;
+    timestamp: string;
+    category: string;
+    priority: string;
+  }> = [];
+
+  for (const seg of segments) {
+    const mins = Math.floor((seg.startTime || 0) / 60);
+    const secs = Math.floor((seg.startTime || 0) % 60);
+    const ts = `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+    for (const cue of cues) {
+      if (cue.regex.test(seg.text || "")) {
+        results.push({
+          quote: seg.text,
+          speaker: seg.speaker,
+          timestamp: ts,
+          category: cue.category,
+          priority: cue.priority,
+        });
+        break;
+      }
+    }
+    if (results.length >= 6) break;
+  }
+  return results;
+}
+
+function detectTranscriptLanguage(
+  title: string,
+  segments: TranscriptSegment[],
+): "ar" | "en" | "mixed" {
+  const combined = `${title} ${segments.map((s) => s.text || "").join(" ")}`;
+  const arabicChars = (combined.match(/[\u0600-\u06FF]/g) || []).length;
+  const latinChars = (combined.match(/[a-zA-Z]/g) || []).length;
+  if (arabicChars > 10 && latinChars > 20 && latinChars > arabicChars * 0.4) return "mixed";
+  if (arabicChars > 0 && arabicChars >= latinChars * 0.25) return "ar";
+  return latinChars > 0 ? "en" : "ar";
+}
+
+function chunkTranscriptSegments(
+  segments: TranscriptSegment[],
+  maxCharsPerChunk = 22000,
+  overlapSegments = 2,
+): string[] {
+  const formatSeg = (s: TranscriptSegment) =>
+    `[${Math.floor(s.startTime / 60)}:${Math.floor(s.startTime % 60)
+      .toString()
+      .padStart(2, "0")}] ${s.speaker}: ${s.text}`;
+
+  const chunks: string[] = [];
+  let i = 0;
+  while (i < segments.length) {
+    let current = "";
+    const startIdx = i;
+    while (i < segments.length) {
+      const line = formatSeg(segments[i]) + "\n";
+      if (current.length > 0 && current.length + line.length > maxCharsPerChunk) {
+        break;
+      }
+      current += line;
+      i++;
+    }
+    if (current.trim()) chunks.push(current.trim());
+    if (i < segments.length && i > startIdx + overlapSegments) {
+      i -= overlapSegments;
+    }
+  }
+  return chunks;
+}
+
+async function prepareTranscriptForLlm(
+  ai: ReturnType<typeof getGeminiClient>,
+  title: string,
+  segments: TranscriptSegment[],
+  maxDirectChars = 24000,
+): Promise<string> {
+  const fullText = segments
+    .map(
+      (s) =>
+        `[${Math.floor(s.startTime / 60)}:${Math.floor(s.startTime % 60)
+          .toString()
+          .padStart(2, "0")}] ${s.speaker}: ${s.text}`,
+    )
+    .join("\n");
+
+  if (fullText.length <= maxDirectChars || !ai) {
+    return fullText.slice(0, maxDirectChars);
+  }
+
+  // Long recording: hierarchically synthesize each overlapping chunk before global analysis
+  const chunks = chunkTranscriptSegments(segments, 20000, 2);
+  const chunkSummaries: string[] = [];
+  for (let idx = 0; idx < chunks.length; idx++) {
+    try {
+      const resp = await ai.models.generateContent({
+        model: "gemini-4-hydrogen",
+        contents: `Extract all key facts, definitions, technical terms, decisions, tasks, speakers, and timestamps from part ${idx + 1}/${chunks.length} of "${title}". Be faithful to the transcript and omit nothing important:\n\n${chunks[idx]}`,
+      });
+      const text = (resp.text || "").trim();
+      if (text) {
+        chunkSummaries.push(`--- Section ${idx + 1}/${chunks.length} ---\n${text}`);
+      }
+    } catch {
+      chunkSummaries.push(chunks[idx].slice(0, Math.floor(maxDirectChars / chunks.length)));
+    }
+  }
+  return chunkSummaries.join("\n\n").slice(0, maxDirectChars);
+}
 
 export async function transcribeAndTranslateAudioChunk(params: {
   audioBase64?: string;
   mimeType?: string;
   interimText?: string;
   recentContext?: string;
-}): Promise<{ arabicText: string; detectedLanguage: string }> {
-  const { audioBase64, mimeType = "audio/webm", interimText, recentContext } = params;
+  language?: string;
+  offsetSeconds?: number;
+  isMeeting?: boolean;
+}): Promise<{ arabicText: string; text: string; detectedLanguage: string }> {
+  const {
+    audioBase64,
+    mimeType = "audio/webm",
+    interimText,
+    recentContext,
+    language = "auto",
+    offsetSeconds = 0,
+    isMeeting = false,
+  } = params;
+
+  // 1. Prefer Python FastAPI whisper/audio service when configured and audio bytes exist
+  if (AI_SERVICE_URL && audioBase64 && audioBase64.length > 64) {
+    try {
+      const audioBytes = Buffer.from(audioBase64, "base64");
+      if (audioBytes.length > 100) {
+        const safeMime = mimeType.split(";")[0].trim() || "audio/webm";
+        const ext = safeMime.includes("wav")
+          ? ".wav"
+          : safeMime.includes("mp4") || safeMime.includes("m4a")
+            ? ".m4a"
+            : safeMime.includes("ogg")
+              ? ".ogg"
+              : ".webm";
+        const form = new FormData();
+        form.append("file", new Blob([audioBytes], { type: safeMime }), `live_chunk${ext}`);
+        form.append("language", language || "auto");
+        form.append("is_meeting", isMeeting ? "true" : "false");
+        form.append("offset_seconds", String(offsetSeconds || 0));
+        form.append("is_partial", "true");
+
+        const resp = await fetch(`${AI_SERVICE_URL}/api/v1/transcribe-chunk`, {
+          method: "POST",
+          body: form,
+          signal: AbortSignal.timeout(25000),
+        });
+        if (resp.ok) {
+          const data = (await resp.json()) as {
+            detected_language?: string;
+            full_text?: string;
+            segments?: Array<{ text?: string }>;
+          };
+          const segmentText = (data.segments || [])
+            .map((s) => (s.text || "").trim())
+            .filter(Boolean)
+            .join(" ")
+            .trim();
+          const finalTxt = segmentText || (data.full_text || "").trim();
+          if (finalTxt) {
+            return {
+              arabicText: finalTxt,
+              text: finalTxt,
+              detectedLanguage: data.detected_language || language || "auto",
+            };
+          }
+        }
+      }
+    } catch {
+      // Fallback gracefully to Gemini ASR
+    }
+  }
+
   const ai = getGeminiClient();
 
   if (ai && audioBase64 && audioBase64.length > 64) {
@@ -83,19 +329,22 @@ export async function transcribeAndTranslateAudioChunk(params: {
         safeMime = "audio/webm";
       }
 
-      const promptText = `أنت محرك التفريغ الصوتي المباشر والترجمة الفورية لمنصة MeetMind AI.
-مهمتك الصارمة:
-1. استمع بدقة لهذا المقطع الصوتي الصغير من الاجتماع أو المحاضرة.
-2. اكتشف لغة المتحدث تلقائياً (سواء كانت لغة إنجليزية، أو لهجة مصرية عامية، أو عربية فصحى، أو مزيج تقني).
-3. القاعدة الذهبية المطلقة: يجب أن يكون الناتج باللغة العربية حصراً بنسبة 100%. لا تعرض أي كلمات إنجليزية أو نصوص أجنبية في الناتج.
-4. إذا كان المتحدث يتحدث بالإنجليزية أو لغة أخرى: تَرجم كلامه مباشرة إلى لغة عربية سليمة ودقيقة وغنية بالمعنى الأكاديمي والتقني.
-5. إذا كان المتحدث يتحدث بالعربية أو اللهجة المصرية: فرّغ كلامه مباشرة بالعربية مع احترام العبارات الحوارية وسياق النقاش.
-6. المصطلحات التقنية والبرمجية: حوّلها إلى مرادفاتها العربية المعتمدة أو تعريبها الصوتي السليم (مثل: واجهة برمجة التطبيقات، التوافق الموزع، قاعدة البيانات، النشر، زمن الاستجابة، خوارزميات، النسخ المتطابقة).
-7. السياق السابق للنقاش للمساعدة في الربط: "${recentContext || "بدء التسجيل المباشر"}"
-8. أخرج النص العربي فقط دون أي مقدمات، ودون أي فواصل زمنية، ودون علامات تنصيص إضافية. إذا كان المقطع مجرد صمت أو ضوضاء بيئية خفيفة، أجب بكلمة واحدة: [صمت].`;
+      const forceArabic = language === "ar-forced";
+      const langInstruction = forceArabic
+        ? "يجب أن يكون الناتج باللغة العربية الفصحى حصراً."
+        : language.startsWith("en")
+          ? "Transcribe faithfully verbatim in the spoken English language without changing to another language."
+          : "Transcribe faithfully verbatim in the original spoken language (Arabic, Egyptian Arabic, English, or mixed technical speech). Do NOT invent words.";
+
+      const promptText = `Transcribe this live audio clip verbatim.
+${langInstruction}
+Recent context: "${recentContext || "Live session start"}"
+Rules:
+1. Return ONLY the exact spoken words cleanly without speaker labels, timestamps, or commentary.
+2. If the audio clip contains only silence or noise with no speech, reply with exact token: [SILENCE]`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-3.8-flash",
+        model: "gemini-3.5-transcribe",
         contents: {
           parts: [
             {
@@ -117,62 +366,36 @@ export async function transcribeAndTranslateAudioChunk(params: {
         !rawOutput.includes("[صمت]") &&
         !rawOutput.toLowerCase().includes("[silence]")
       ) {
-        const arabicOnly = rawOutput
+        const cleaned = rawOutput
           .replace(/\b(English|Translation|Speaker|Arabic|Transcript):\s*/gi, "")
           .trim();
-        if (arabicOnly.length > 0) {
+        if (cleaned.length > 0) {
           return {
-            arabicText: arabicOnly,
-            detectedLanguage: "Multilingual Speech (Auto-detected & Translated to Arabic)",
+            arabicText: cleaned,
+            text: cleaned,
+            detectedLanguage: language === "auto" ? "Auto-detected" : language,
           };
         }
       }
     } catch (geminiError) {
-      console.warn(
-        "Gemini transcription warning, falling back to smart contextual processor:",
-        geminiError,
-      );
+      console.warn("Gemini live transcription warning:", geminiError);
     }
   }
 
-  // Fallback translation if client provided interim recognized text
+  // Only clean user-spoken WebSpeech interim text if provided; never fabricate text
   if (interimText && interimText.trim()) {
-    let converted = interimText.trim();
-    for (const [term, arabic] of Object.entries(TECHNICAL_TERMS_MAP)) {
-      const regex = new RegExp(`\\b${term}\\b`, "gi");
-      converted = converted.replace(regex, arabic);
-    }
-
-    const phraseMap: Record<string, string> = {
-      "hello everyone": "مرحباً بالجميع",
-      "welcome everyone": "أهلاً ومرحباً بكم جميعاً",
-      "today we are going to discuss": "اليوم سنناقش بالتفصيل",
-      "as you can see": "كما تلاحظون هنا",
-      "let's move to the next point": "دعونا ننتقل إلى النقطة التالية",
-      "are there any questions": "هل توجد أي استفسارات أو أسئلة؟",
-      "in distributed systems": "في الأنظمة الموزعة",
-      "for the midterm exam": "بالنسبة لاختبار منتصف الفصل",
-      "we need to optimize performance": "علينا تحسين كفاءة وأداء النظام",
-      "latency is very important": "زمن الاستجابة عنصر بالغ الأهمية",
-      "the meeting is started": "بدأت الجلسة",
-      "good morning": "صباح الخير",
-      "thank you": "شكراً لكم",
-    };
-
-    for (const [en, ar] of Object.entries(phraseMap)) {
-      const regex = new RegExp(en, "gi");
-      converted = converted.replace(regex, ar);
-    }
-
+    const trimmed = interimText.trim();
     return {
-      arabicText: converted,
-      detectedLanguage: "Audio Stream Processed",
+      arabicText: trimmed,
+      text: trimmed,
+      detectedLanguage: language || "Browser Speech",
     };
   }
 
   return {
     arabicText: "",
-    detectedLanguage: "Arabic",
+    text: "",
+    detectedLanguage: language || "auto",
   };
 }
 
@@ -202,27 +425,42 @@ export async function generateAiSummary(
     };
   }
 
-  const transcriptText = segments
-    .map(
-      (s) =>
-        `[${Math.floor(s.startTime / 60)}:${(s.startTime % 60).toString().padStart(2, "0")}] ${s.speaker}: ${s.text}`,
-    )
-    .join("\n");
-
+  const detectedLang = detectTranscriptLanguage(title, segments);
   const ai = getGeminiClient();
   if (ai) {
     try {
-      const prompt = `أنت المساعد الذكي الأكاديمي والمهني المتخصص في منصة MeetMind AI.
+      const preparedTranscript = await prepareTranscriptForLlm(ai, title, segments, 24000);
+      const isEnglish = detectedLang === "en";
+      const prompt = isEnglish
+        ? `You are the MeetMind AI ${type === "lecture" ? "Academic Study" : "Meeting Intelligence"} analyst.
+Summarize "${title}" ${courseCode ? `(Course: ${courseCode})` : ""} strictly based ONLY on the transcript below.
+STRICT GROUNDING RULES:
+1. Do NOT invent any names, numbers, dates, tasks, or facts not explicitly in the transcript.
+2. Respond in clear professional English matching the recording.
+
+Transcript:
+"""
+${preparedTranscript}
+"""
+
+Format your Markdown summary with these headings:
+# Executive Summary
+## Key Points
+## Detailed Topics Discussed
+## Definitions & Key Terms
+## Decisions & Action Items
+## Highlighted Takeaways`
+        : `أنت المساعد الذكي الأكاديمي والمهني المتخصص في منصة MeetMind AI.
 مهمتك: تلخيص دقيق وشامل واحترافي لجلسة "${title}" ${courseCode ? `(مقرر: ${courseCode})` : ""} بناءً حصراً على النص المفرغ التالي.
 القاعدة الصارمة: لا تختلق أو تبتكر أي معلومات لم تذكر في النص المفرغ. يجب أن يكون كل بند مستنداً إلى ما قاله المتحدثون فعلياً.
-يجب أن تكون النتيجة كاملة باللغة العربية.
+اكتب التلخيص باللغة العربية مع الحفاظ على المصطلحات التقنية الإنجليزية كما وردت.
 
 النص المفرغ:
 """
-${transcriptText}
+${preparedTranscript}
 """
 
-المطلوب إخراج التلخيص بالهيكل المنظم التالي بالعربية:
+المطلوب إخراج التلخيص بالهيكل المنظم التالي:
 # الفكرة العامة
 (فقرة مكثفة تلخص الهدف والمحور الأساسي للجلسة)
 
@@ -248,7 +486,7 @@ ${transcriptText}
 (إذا كانت محاضرة تعليمية، استخلص النقاط المرشحة للمراجعة أو الأسئلة التي طرحها الطلاب أو المحاضر)`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-3.8-flash",
+        model: "gemini-4-hydrogen",
         contents: prompt,
       });
 
@@ -258,7 +496,7 @@ ${transcriptText}
         const lines = summaryText.split("\n");
         let capturing = false;
         for (const line of lines) {
-          if (line.includes("أهم النقاط")) {
+          if (line.includes("أهم النقاط") || line.includes("Key Points")) {
             capturing = true;
             continue;
           }
@@ -273,12 +511,7 @@ ${transcriptText}
         return {
           summary: summaryText,
           keyPoints:
-            keyPoints.length > 0
-              ? keyPoints.slice(0, 5)
-              : [
-                  `مراجعة الأفكار الأساسية ومحاور النقاش المطروحة في "${title}".`,
-                  `تحديد الأولويات والالتزامات الواردة في الجلسة.`,
-                ],
+            keyPoints.length > 0 ? keyPoints.slice(0, 6) : segments.slice(0, 4).map((s) => s.text),
           decisions: [],
           actionItems: [],
         };
@@ -288,27 +521,50 @@ ${transcriptText}
     }
   }
 
-  // Grounded Deterministic Extractor Fallback
+  // Grounded Extractive Fallback (Strictly derived from actual transcript segments — no generic invented filler)
+  const keywords = extractKeywordsWithFrequency(segments, 5).map((k) => k.term);
+  const bulletLines = segments.slice(0, 5).map(
+    (s) =>
+      `- [${Math.floor(s.startTime / 60)
+        .toString()
+        .padStart(2, "0")}:${Math.floor(s.startTime % 60)
+        .toString()
+        .padStart(2, "0")}] ${s.speaker}: ${s.text}`,
+  );
+  const highlights = extractHighlightsFromSegments(segments);
+  const extractedTasks: Array<{
+    title: string;
+    ownerName?: string;
+    dueDate?: string;
+    priority: "high" | "medium" | "low";
+  }> = [];
+
+  for (const s of segments) {
+    if (/(action item|todo|must |need to|deadline|assign|يجب|سوف|تكليف|مهمة|تنفيذ)/i.test(s.text)) {
+      extractedTasks.push({
+        title: s.text.length > 120 ? `${s.text.slice(0, 120)}...` : s.text,
+        dueDate: "Deadline not specified.",
+        priority: /(urgent|high|critical|فوري|عاجل|مهم)/i.test(s.text) ? "high" : "medium",
+      });
+      if (extractedTasks.length >= 5) break;
+    }
+  }
+
   const summary =
-    `# الفكرة العامة\nتناولت هذه الجلسة موضوع "${title}" ${courseCode ? `لمقرر ${courseCode}` : ""}، حيث ركز النقاش على استعراض المحاور الأساسية والتطبيقات المرتبطة بها.\n\n` +
-    `## أهم النقاط\n` +
-    segments
-      .slice(0, 4)
-      .map(
-        (s) =>
-          `- [${Math.floor(s.startTime / 60)}:${(s.startTime % 60).toString().padStart(2, "0")}] ${s.speaker}: ${s.text}`,
-      )
-      .join("\n") +
-    `\n\n## شرح مختصر للموضوعات\nاستعرض المتحدثون المفاهيم المحورية المتعلقة بالبنية التحتية، مع تسليط الضوء على المتطلبات التشغيلية ومعايير الكفاءة.\n\n` +
-    `## التعريفات والمصطلحات المهمة\n- المفاهيم المستخلصة من الحوار تركز على الأداء، التوافق، والاستجابة السريعة.\n\n` +
-    `## النقاط التي أكد المتحدث على أهميتها\n- الالتزام بالمعايير المحددة، وضمان التنسيق المستمر بين فرق العمل.\n\n` +
-    `## الأسئلة والموضوعات المحتمل مراجعتها للامتحان\n- مراجعة الثوابت والشروط الأساسية التي نوقشت خلال الدقائق الأولى من الجلسة.`;
+    `# ${title}${courseCode ? ` (${courseCode})` : ""}\n` +
+    `${segments[0]?.text || ""}\n\n` +
+    `## Key Segments\n` +
+    bulletLines.join("\n") +
+    (keywords.length > 0 ? `\n\n## Extracted Keywords\n- ${keywords.join("، ")}` : "") +
+    (highlights.length > 0
+      ? `\n\n## Highlights\n${highlights.map((h) => `- [${h.timestamp}] ${h.quote}`).join("\n")}`
+      : "");
 
   return {
     summary,
-    keyPoints: segments.slice(0, 3).map((s) => s.text),
-    decisions: [],
-    actionItems: [],
+    keyPoints: segments.slice(0, 4).map((s) => s.text),
+    decisions: highlights.filter((h) => h.category === "Decision").map((h) => h.quote),
+    actionItems: extractedTasks,
   };
 }
 
@@ -318,53 +574,83 @@ export async function generateAiQuiz(
   segments: TranscriptSegment[],
   summaryText?: string,
   courseCode?: string,
+  options?: {
+    avoidQuestionTitles?: string[];
+    variant?: number;
+    difficulty?: "all" | "easy" | "medium" | "hard";
+  },
 ): Promise<{
   title: string;
   courseCode?: string;
   questions: Array<{
     id: string;
     question: string;
-    type: "multiple_choice" | "true_false" | "short_answer";
+    type: "multiple_choice" | "true_false" | "short_answer" | "fill_in_the_blank";
     options: string[];
     correctOptionIndex: number;
+    correctAnswerText?: string;
+    acceptableAnswers?: string[];
     explanation: string;
+    difficulty: "easy" | "medium" | "hard";
+    sectionRef: string;
     timestampRef?: string;
   }>;
 }> {
-  const fullText = segments.map((s) => `[${s.startTime}s] ${s.speaker}: ${s.text}`).join("\n");
+  const detectedLang = detectTranscriptLanguage(title, segments);
   const ai = getGeminiClient();
+  const variant = options?.variant || 1;
 
   if (ai && segments.length > 0) {
     try {
-      const prompt = `أنت خبير إعداد الاختبارات والتقييمات الأكاديمية في منصة MeetMind AI.
-المهمة: قم بإنشاء اختبار ذكي من 4 إلى 5 أسئلة مستندة حصراً وبدقة إلى النص التالي لمحاضرة أو اجتماع "${title}".
-القاعدة الصارمة: لا تختلق أي معلومة غير موجودة في النص. إذا كانت المعلومات في النص غير كافية، اكتب أسئلة أقل تغطي بدقة ما قيل.
-يجب أن تشمل الأسئلة تنوعاً (اختيار من متعدد، صح وخطأ، وأسئلة فهم مفاهيمي).
+      const preparedTranscript = await prepareTranscriptForLlm(ai, title, segments, 24000);
+      const avoidList = (options?.avoidQuestionTitles || []).slice(0, 15).join(" | ");
+      const langDirective =
+        detectedLang === "en"
+          ? "Generate ALL questions, options, and explanations in clear English matching the transcript."
+          : "أنشئ الأسئلة والخيارات والشروحات باللغة العربية مع الحفاظ على المصطلحات التقنية كما وردت.";
+      const prompt = `أنت بروفيسور وخبير تقييم أكاديمي في منصة MeetMind AI.
+المهمة الصارمة: أنشئ اختباراً شاملاً ومتنوعاً من 6 إلى 8 أسئلة يغطي كامل أجزاء المحاضرة/الاجتماع: "${title}" (البداية، المنتصف، الخاتمة والتطبيقات).
+${langDirective}
+
+القواعد الأكاديمية الصارمة:
+1. الأسئلة مستندة بنسبة 100% إلى النص المفرغ الفعلي دون أي اختلاق.
+2. نوع في أنواع الأسئلة الأربعة لتشمل:
+   - "multiple_choice" (اختيار من متعدد بأربعة خيارات دقيقة)
+   - "true_false" (صح وخطأ، الخيارات ["True", "False"] أو ["صح (صواب)", "خطأ"])
+   - "fill_in_the_blank" (أكمل الفراغ: السؤال يحتوي على فراغ "___" والإجابة الصحيحة كلمة أو مصطلح دقيق)
+   - "short_answer" (سؤال مقالي تحليلي قصير مع نموذج إجابة وشرح استدلالي)
+3. نوع في مستويات الصعوبة: "easy"، "medium"، "hard".
+4. حدد القسم والزمن الفعلي (sectionRef، timestampRef).
+5. ${avoidList ? `تجنب تكرار هذه الأسئلة التي طُرحت سابقاً: ${avoidList}` : `هذا الإصدار ${variant} من الاختبار.`}
 
 النص المفرغ:
 """
-${fullText}
+${preparedTranscript}
 """
 
-الملخص (للاستئناس):
+الملخص التوجيهي:
 """
 ${summaryText || ""}
 """
 
-المطلوب إرجاع مصفوفة JSON فقط بالشكل التالي دون أي نصوص إضافية:
+المطلوب إرجاع مصفوفة JSON فقط بالشكل التالي:
 [
   {
-    "question": "نص السؤال بالعربية",
+    "question": "...",
     "type": "multiple_choice",
-    "options": ["الخيار 1", "الخيار 2", "الخيار 3", "الخيار 4"],
+    "options": ["...", "...", "...", "..."],
     "correctOptionIndex": 0,
-    "explanation": "شرح الإجابة الصحيحة باللغة العربية بناءً على ما ورد في المحاضرة",
-    "timestampRef": "00:45"
+    "correctAnswerText": "...",
+    "acceptableAnswers": [],
+    "explanation": "...",
+    "difficulty": "medium",
+    "sectionRef": "...",
+    "timestampRef": "02:15"
   }
 ]`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-3.8-flash",
+        model: "gemini-4-hydrogen",
         contents: prompt,
         config: {
           responseMimeType: "application/json",
@@ -373,17 +659,47 @@ ${summaryText || ""}
 
       const jsonStr = (response.text || "").trim();
       const parsed = JSON.parse(jsonStr);
-      if (Array.isArray(parsed) && parsed.length > 0) {
+      if (Array.isArray(parsed) && parsed.length >= 3) {
         return {
-          title: `اختبار الفهم: ${title}`,
+          title:
+            detectedLang === "en"
+              ? `Comprehension Quiz (${variant > 1 ? `Variant ${variant}` : "Main"}): ${title}`
+              : `اختبار الفهم الشامل (${variant > 1 ? `النموذج ${variant}` : "النموذج الرئيسي"}): ${title}`,
           courseCode,
           questions: parsed.map((q, idx) => ({
             id: `q_${Date.now()}_${idx + 1}`,
             question: q.question,
-            type: q.type || "multiple_choice",
-            options: Array.isArray(q.options) && q.options.length > 0 ? q.options : ["صحيح", "خطأ"],
+            type:
+              q.type ||
+              (idx % 4 === 0
+                ? "multiple_choice"
+                : idx % 4 === 1
+                  ? "true_false"
+                  : idx % 4 === 2
+                    ? "fill_in_the_blank"
+                    : "short_answer"),
+            options:
+              Array.isArray(q.options) && q.options.length > 0
+                ? q.options
+                : q.type === "true_false"
+                  ? detectedLang === "en"
+                    ? ["True", "False"]
+                    : ["صح (صواب)", "خطأ"]
+                  : [],
             correctOptionIndex: typeof q.correctOptionIndex === "number" ? q.correctOptionIndex : 0,
-            explanation: q.explanation || "الإجابة مستخلصة مباشرة من نص المحاضرة.",
+            correctAnswerText:
+              q.correctAnswerText || (q.options ? q.options[q.correctOptionIndex || 0] : undefined),
+            acceptableAnswers: Array.isArray(q.acceptableAnswers) ? q.acceptableAnswers : [],
+            explanation:
+              q.explanation ||
+              (detectedLang === "en"
+                ? "Directly verified from the recorded transcript."
+                : "الإجابة مستخلصة وموثقة مباشرة من نص المحاضرة المسجل."),
+            difficulty: (["easy", "medium", "hard"].includes(q.difficulty)
+              ? q.difficulty
+              : "medium") as "easy" | "medium" | "hard",
+            sectionRef:
+              q.sectionRef || (detectedLang === "en" ? "Transcript Section" : "محاور الجلسة"),
             timestampRef: q.timestampRef || "00:00",
           })),
         };
@@ -393,36 +709,170 @@ ${summaryText || ""}
     }
   }
 
-  // Deterministic Grounded Quiz Generator
-  const firstSeg = segments[0]?.text || title;
-  const secondSeg = segments[1]?.text || "مراجعة التفاصيل التقنية المطروحة";
+  // Deterministic Grounded Multi-Type Fallback covering the entire actual transcript
+  const formatTimeStr = (sec: number) => {
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+  };
+
+  const validSegs = segments.filter((s) => s.text && s.text.trim().length > 15);
+  const targetSegs = validSegs.length >= 3 ? validSegs : segments;
+
+  const seg0 = targetSegs[0] || { text: title, startTime: 0, speaker: "Speaker" };
+  const midIdx = Math.floor(targetSegs.length / 2);
+  const segMid = targetSegs[midIdx] || seg0;
+  const segLast = targetSegs[targetSegs.length - 1] || seg0;
+  const segQuarter = targetSegs[Math.floor(targetSegs.length / 4)] || seg0;
+  const segThreeQuarter = targetSegs[Math.floor((targetSegs.length * 3) / 4)] || segMid;
+
+  // Extract a factual keyword directly from segQuarter without hardcoded topic guesses
+  const kwFromSeg = extractKeywordsWithFrequency([segQuarter as TranscriptSegment], 1)[0]?.term;
+  const wordsQuarter = segQuarter.text
+    .split(/\s+/)
+    .map((w) => w.replace(/[^ء-يa-zA-Z0-9_-]/g, ""))
+    .filter((w) => w.length > 3);
+  const targetKeyword = kwFromSeg || wordsQuarter[0] || segQuarter.text.split(/\s+/)[0] || title;
+
+  if (detectedLang === "en") {
+    return {
+      title: `Comprehension Quiz (${variant > 1 ? `Variant ${variant}` : "Comprehensive"}): ${title}`,
+      courseCode,
+      questions: [
+        {
+          id: `q_mcq_1`,
+          question: `Which statement was made at the opening of "${title}"?`,
+          type: "multiple_choice",
+          options: [
+            seg0.text.length > 90 ? seg0.text.slice(0, 90) + "..." : seg0.text,
+            "No agenda topics were covered during this recording.",
+            "The recording ended before any concepts were introduced.",
+            "None of the recorded statements apply.",
+          ],
+          correctOptionIndex: 0,
+          correctAnswerText: seg0.text,
+          explanation: `Verified at [${formatTimeStr(seg0.startTime)}]: "${seg0.text}".`,
+          difficulty: "easy",
+          sectionRef: "Opening",
+          timestampRef: formatTimeStr(seg0.startTime),
+        },
+        {
+          id: `q_tf_1`,
+          question: `True or False: Around [${formatTimeStr(segMid.startTime)}], ${segMid.speaker} stated: "${segMid.text.length > 80 ? segMid.text.slice(0, 80) + "..." : segMid.text}"`,
+          type: "true_false",
+          options: ["True", "False"],
+          correctOptionIndex: 0,
+          correctAnswerText: "True",
+          explanation: `Confirmed verbatim at [${formatTimeStr(segMid.startTime)}].`,
+          difficulty: "easy",
+          sectionRef: "Core Discussion",
+          timestampRef: formatTimeStr(segMid.startTime),
+        },
+        {
+          id: `q_fill_1`,
+          question: `Complete the exact statement recorded at [${formatTimeStr(segQuarter.startTime)}]: "${segQuarter.text.replace(targetKeyword, "___")}"`,
+          type: "fill_in_the_blank",
+          options: [],
+          correctOptionIndex: 0,
+          correctAnswerText: targetKeyword,
+          acceptableAnswers: [targetKeyword],
+          explanation: `Taken verbatim from [${formatTimeStr(segQuarter.startTime)}].`,
+          difficulty: "medium",
+          sectionRef: "Key Terminology",
+          timestampRef: formatTimeStr(segQuarter.startTime),
+        },
+        {
+          id: `q_sa_1`,
+          question: `What closing point did ${segLast.speaker} emphasize at [${formatTimeStr(segLast.startTime)}] in "${title}"?`,
+          type: "short_answer",
+          options: [],
+          correctOptionIndex: 0,
+          correctAnswerText: segLast.text,
+          explanation: `Recorded at [${formatTimeStr(segLast.startTime)}]: "${segLast.text}".`,
+          difficulty: "hard",
+          sectionRef: "Closing",
+          timestampRef: formatTimeStr(segLast.startTime),
+        },
+      ],
+    };
+  }
 
   return {
-    title: `اختبار الفهم: ${title}`,
+    title: `اختبار الفهم الشامل (${variant > 1 ? `النموذج ${variant}` : "النموذج الشامل"}): ${title}`,
     courseCode,
     questions: [
       {
-        id: `q_fallback_1`,
-        question: `ما هو المحور الأساسي الذي نوقش في بداية "${title}"؟`,
+        id: `q_mcq_1`,
+        question: `ما هو المحور الأساسي الذي تحدث عنه المتحدث في مستهل تسجيل "${title}"؟`,
         type: "multiple_choice",
         options: [
-          firstSeg.length > 70 ? firstSeg.slice(0, 70) + "..." : firstSeg,
-          "تجاوز جميع المعايير المتفق عليها مسبقاً",
-          "إلغاء أهداف المشروع دون توثيق",
-          "تأجيل النقاشات التقنية لأجل غير مسمى",
+          seg0.text.length > 90 ? seg0.text.slice(0, 90) + "..." : seg0.text,
+          "تجاوز جميع الأهداف والالتزامات الأكاديمية دون توثيق",
+          "إلغاء محاور المحاضرة وتأجيل الاستنتاجات",
+          "عدم الاكتراث بالمعايير التشغيلية المطروحة",
         ],
         correctOptionIndex: 0,
-        explanation: `بناءً على بداية التسجيل، أكد المتحدث: "${firstSeg}".`,
-        timestampRef: "00:00",
+        correctAnswerText: seg0.text,
+        explanation: `استند المتحدث في المقطع [${formatTimeStr(seg0.startTime)}] إلى القول: "${seg0.text}".`,
+        difficulty: "easy",
+        sectionRef: "المقدمة والمنطلقات",
+        timestampRef: formatTimeStr(seg0.startTime),
       },
       {
-        id: `q_fallback_2`,
-        question: `هل تم التأكيد خلال الجلسة على النقاط التشغيلية التالية: "${secondSeg.slice(0, 50)}..."؟`,
+        id: `q_tf_1`,
+        question: `أكد المتحدث في منتصف التسجيل ما نصه: "${segMid.text.length > 80 ? segMid.text.slice(0, 80) + "..." : segMid.text}"؟`,
         type: "true_false",
-        options: ["صحيح ومؤكد في النص", "غير صحيح ولم يذكر"],
+        options: ["صح (صواب)", "خطأ"],
         correctOptionIndex: 0,
-        explanation: "النص المفرغ يوضح بصراحة مناقشة هذا الموضوع من قبل المتحدثين.",
-        timestampRef: "00:25",
+        correctAnswerText: "صح (صواب)",
+        explanation: `النص المفرغ الفعلي يثبت صراحة في الدقيقة [${formatTimeStr(segMid.startTime)}] هذا الطرح: "${segMid.text}".`,
+        difficulty: "easy",
+        sectionRef: "الصلب النظري والمفاهيم",
+        timestampRef: formatTimeStr(segMid.startTime),
+      },
+      {
+        id: `q_fill_1`,
+        question: `وفقاً لما ورد في الشرح: "${segQuarter.text.replace(targetKeyword, "___")}"، الكلمة الصحيحة في الفراغ هي:`,
+        type: "fill_in_the_blank",
+        options: [],
+        correctOptionIndex: 0,
+        correctAnswerText: targetKeyword,
+        acceptableAnswers: [targetKeyword],
+        explanation: `استشهد المتحدث في التوقيت [${formatTimeStr(segQuarter.startTime)}] بهذا المصطلح نصاً.`,
+        difficulty: "medium",
+        sectionRef: "المصطلحات المحورية",
+        timestampRef: formatTimeStr(segQuarter.startTime),
+      },
+      {
+        id: `q_mcq_2`,
+        question: `في الجزء المتقدم من الجلسة، ما الذي تم التشديد عليه بخصوص التطبيق العملي؟`,
+        type: "multiple_choice",
+        options: [
+          segThreeQuarter.text.length > 90
+            ? segThreeQuarter.text.slice(0, 90) + "..."
+            : segThreeQuarter.text,
+          "التوقف التام عن مراجعة المفاهيم والنتائج",
+          "استبدال جميع مخرجات العمل بنماذج افتراضية غير حقيقية",
+          "إهمال الجداول الزمنية المتفق عليها",
+        ],
+        correctOptionIndex: 0,
+        correctAnswerText: segThreeQuarter.text,
+        explanation: `ذكر المتحدث في التوقيت [${formatTimeStr(segThreeQuarter.startTime)}] نصاً: "${segThreeQuarter.text}".`,
+        difficulty: "medium",
+        sectionRef: "التطبيقات المتقدمة",
+        timestampRef: formatTimeStr(segThreeQuarter.startTime),
+      },
+      {
+        id: `q_sa_1`,
+        question: `ما هي الخلاصة والتوجيه النهائي الذي اختتم به المتحدث جلسة "${title}"؟`,
+        type: "short_answer",
+        options: [],
+        correctOptionIndex: 0,
+        correctAnswerText: segLast.text,
+        explanation: `أوضح المتحدث في ختام التسجيل عند [${formatTimeStr(segLast.startTime)}]: "${segLast.text}".`,
+        difficulty: "hard",
+        sectionRef: "الخاتمة والتوصيات",
+        timestampRef: formatTimeStr(segLast.startTime),
       },
     ],
   };
@@ -444,46 +894,52 @@ export async function generateAiLectureAnalysis(
   importantSentences: string[];
   reviewAreas: string[];
 }> {
-  const fullText = segments.map((s) => `[${s.startTime}s] ${s.speaker}: ${s.text}`).join("\n");
+  const detectedLang = detectTranscriptLanguage(title, segments);
   const ai = getGeminiClient();
 
   if (ai && segments.length > 0) {
     try {
+      const preparedTranscript = await prepareTranscriptForLlm(ai, title, segments, 24000);
+      const langDirective =
+        detectedLang === "en"
+          ? "Return all string values in English matching the transcript."
+          : "حلل المحتوى باللغة العربية مع الحفاظ على المصطلحات التقنية كما وردت.";
       const prompt = `أنت محلل المحاضرات والاجتماعات الذكي في MeetMind AI.
-حلل النص المفرغ التالي لجلسة "${title}" بدقة فائقة وباللغة العربية حصراً دون أي اختلاق:
+حلل النص المفرغ التالي لجلسة "${title}" (${type}${courseCode ? ` - ${courseCode}` : ""}) بدقة فائقة دون أي اختلاق:
+${langDirective}
 النص المفرغ:
 """
-${fullText}
+${preparedTranscript}
 """
 
 المطلوب إخراج كائن JSON فقط بالهيكل التالي:
 {
-  "topics": ["الموضوع 1", "الموضوع 2"],
-  "keywords": ["الكلمة 1", "الكلمة 2", "الكلمة 3"],
+  "topics": ["Topic 1"],
+  "keywords": ["Keyword 1", "Keyword 2"],
   "definitions": [
-    {"term": "المصطلح", "definition": "التعريف المذكور في المحاضرة", "timestamp": "00:30"}
+    {"term": "Term", "definition": "Definition stated in session", "timestamp": "00:30"}
   ],
   "questionsAsked": [
-    {"question": "السؤال الذي طُرح أثناء المحاضرة", "answer": "الإجابة إن وجدت", "timestamp": "01:15"}
+    {"question": "Question asked", "answer": "Answer if stated", "timestamp": "01:15"}
   ],
   "actionItems": [
-    {"task": "المهمة أو التكليف", "owner": "المسؤول إن ذُكر", "deadline": "الموعد إن وُجد"}
+    {"task": "Task or deliverable", "owner": "Owner if named else null", "deadline": "Deadline if named else Deadline not specified."}
   ],
-  "emphasizedPoints": ["النقاط التي شدد عليها المحاضر والعبارات التحذيرية أو التوجيهية مثل (ركزوا على النقطة دي، دي مهمة في الامتحان، احفظوا هذا المصطلح)"],
-  "importantSentences": ["أهم الجمل والمعلومات المحورية الواردة في الشرح مع سياقها"],
-  "reviewAreas": ["الجوانب التي ينصح بمراجعتها بعمق"]
+  "emphasizedPoints": ["Important points emphasized by the speaker"],
+  "importantSentences": ["Key statements from the transcript"],
+  "reviewAreas": ["Areas to review"]
 }`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-3.8-flash",
+        model: "gemini-4-hydrogen",
         contents: prompt,
         config: { responseMimeType: "application/json" },
       });
 
       const parsed = JSON.parse(response.text || "{}");
       return {
-        topics: parsed.topics || ["تحليل الجلسة"],
-        keywords: parsed.keywords || ["مراجعة"],
+        topics: parsed.topics || [title],
+        keywords: parsed.keywords || [],
         definitions: parsed.definitions || [],
         questionsAsked: parsed.questionsAsked || [],
         actionItems: parsed.actionItems || [],
@@ -496,86 +952,86 @@ ${fullText}
     }
   }
 
-  // Deterministic Grounded Fallback
+  // Deterministic Grounded Fallback derived strictly from actual transcript segments
+  const kwItems = extractKeywordsWithFrequency(segments, 8);
+  const hlItems = extractHighlightsFromSegments(segments);
+  const extractedTasks = segments
+    .filter((s) => /(action|task|todo|submit|deliver|يجب|مهمة|تسليم|تنفيذ)/i.test(s.text))
+    .slice(0, 5)
+    .map((s) => ({
+      task: s.text,
+      deadline: "Deadline not specified.",
+    }));
+
   return {
-    topics: [title, type === "lecture" ? courseCode || "المحاضرة" : "الاجتماع"],
-    keywords: ["التفريغ المباشر", "الأداء", "التحليل الذكي"],
-    definitions: [
-      {
-        term: title,
-        definition: "الموضوع الرئيسي الذي دار حوله التفريغ الصوتي والنقاش.",
-        timestamp: "00:00",
-      },
-    ],
-    questionsAsked: [],
-    actionItems: [],
-    emphasizedPoints: [segments[0]?.text || "التأكيد على استيعاب المفاهيم والمحاور المطروحة بدقة."],
-    importantSentences: segments.slice(0, 3).map((s) => s.text),
-    reviewAreas: ["مراجعة التسجيل الصوتي ومطابقة النقاط المذكورة مع الملاحظات الدراسية."],
+    topics:
+      kwItems.slice(0, 4).map((k) => k.term).length > 0
+        ? kwItems.slice(0, 4).map((k) => k.term)
+        : [title],
+    keywords: kwItems.map((k) => k.term),
+    definitions: hlItems
+      .filter((h) => h.category === "Definition")
+      .map((h) => ({ term: title, definition: h.quote, timestamp: h.timestamp })),
+    questionsAsked: segments
+      .filter((s) => /[?؟]/.test(s.text))
+      .slice(0, 5)
+      .map((s) => ({
+        question: s.text,
+        timestamp: `${Math.floor(s.startTime / 60)
+          .toString()
+          .padStart(2, "0")}:${Math.floor(s.startTime % 60)
+          .toString()
+          .padStart(2, "0")}`,
+      })),
+    actionItems: extractedTasks,
+    emphasizedPoints: hlItems.map((h) => h.quote),
+    importantSentences: segments.slice(0, 4).map((s) => s.text),
+    reviewAreas: kwItems.slice(0, 3).map((k) => k.term),
   };
 }
 
 export function generateAnalysisFromTranscript(
   title: string,
   segments: TranscriptSegment[],
-  type: "meeting" | "lecture",
-  courseCode?: string,
+  _type: "meeting" | "lecture",
+  _courseCode?: string,
 ): AIAnalysisResult {
-  const fullText = segments.map((s) => `${s.speaker}: ${s.text}`).join("\n");
-  const words = fullText.split(/\s+/).filter(Boolean);
-
-  const stopWords = new Set([
-    "في",
-    "من",
-    "على",
-    "إلى",
-    "عن",
-    "مع",
-    "هذا",
-    "هذه",
-    "ذلك",
-    "تم",
-    "كان",
-    "يكون",
-    "كل",
-    "هو",
-    "هي",
-    "نحن",
-    "أن",
-    "إن",
-    "هل",
-    "ما",
-  ]);
-
-  const wordCounts = new Map<string, number>();
-  for (const w of words) {
-    const clean = w.replace(/[^ء-يa-zA-Z0-9]/g, "");
-    if (clean.length > 3 && !stopWords.has(clean)) {
-      wordCounts.set(clean, (wordCounts.get(clean) || 0) + 1);
-    }
+  if (!segments || segments.length === 0) {
+    return {
+      summary: "",
+      keyPoints: [],
+      decisions: [],
+      topics: [],
+      actionItems: [],
+      lectureNotes: "",
+    };
   }
 
-  const topWords = Array.from(wordCounts.entries())
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 5)
-    .map(([w]) => w);
-
-  const summary = `ملخص جلسة "${title}": دار النقاش حول الأولويات التشغيلية والمعايير التقنية مع التركيز على كفاءة الأداء.`;
+  const kwItems = extractKeywordsWithFrequency(segments, 6);
+  const hlItems = extractHighlightsFromSegments(segments);
   const keyPoints = segments.slice(0, 4).map((s) => s.text);
+  const summary = segments
+    .slice(0, 3)
+    .map((s) => `${s.speaker}: ${s.text}`)
+    .join(" ");
+
+  const actionItems = segments
+    .filter((s) => /(action|task|todo|must |need to|deliver|يجب|مهمة|تكليف|تسليم)/i.test(s.text))
+    .slice(0, 5)
+    .map((s) => ({
+      title: s.text.length > 110 ? `${s.text.slice(0, 110)}...` : s.text,
+      dueDate: "Deadline not specified.",
+      priority: /(urgent|high|critical|عاجل|فوري)/i.test(s.text)
+        ? ("high" as const)
+        : ("medium" as const),
+    }));
 
   return {
     summary,
-    keyPoints: keyPoints.length > 0 ? keyPoints : [`مراجعة أهداف ومخرجات ${title}.`],
-    decisions: [`توثيق نتائج جلسة ${title} واعتمادها.`],
-    topics: topWords.length > 0 ? topWords : ["التفريغ الذكي", "التحليل"],
-    actionItems: [
-      {
-        title: `متابعة مخرجات وتوصيات ${title}`,
-        ownerName: "المسؤول",
-        dueDate: new Date(Date.now() + 86400000).toISOString().split("T")[0],
-        priority: "high" as const,
-      },
-    ],
+    keyPoints,
+    decisions: hlItems.filter((h) => h.category === "Decision").map((h) => h.quote),
+    topics: kwItems.map((k) => k.term),
+    actionItems,
     lectureNotes: summary,
   };
 }
@@ -584,16 +1040,85 @@ export function answerGroundedQuestion(
   question: string,
   segments: TranscriptSegment[],
   title: string,
-): { answer: string; citations: { speaker: string; timestamp: string; quote: string }[] } {
+): {
+  answer: string;
+  evidenceFound: boolean;
+  citations: { speaker: string; timestamp: string; quote: string }[];
+} {
+  const stopWords = new Set([
+    "the",
+    "and",
+    "for",
+    "are",
+    "but",
+    "not",
+    "you",
+    "all",
+    "can",
+    "her",
+    "was",
+    "one",
+    "our",
+    "out",
+    "has",
+    "had",
+    "how",
+    "why",
+    "who",
+    "its",
+    "with",
+    "that",
+    "this",
+    "from",
+    "they",
+    "will",
+    "have",
+    "been",
+    "were",
+    "said",
+    "what",
+    "when",
+    "where",
+    "which",
+    "about",
+    "does",
+    "did",
+    "في",
+    "من",
+    "إلى",
+    "على",
+    "هذا",
+    "هذه",
+    "ذلك",
+    "التي",
+    "الذي",
+    "مع",
+    "كان",
+    "ليس",
+    "ماذا",
+    "كيف",
+    "متى",
+    "أين",
+    "هل",
+    "عن",
+  ]);
   const queryLower = question.toLowerCase();
-  const queryWords = queryLower.split(/\s+/).filter((w) => w.length > 3);
+  const queryWords = queryLower
+    .split(/[\s؟?!.,،:;()"']+/)
+    .map((w) => w.trim())
+    .filter((w) => w.length > 2 && !stopWords.has(w));
 
   const scoredSegments = segments
     .map((seg) => {
       let score = 0;
       const textLower = seg.text.toLowerCase();
+      const textTokens = new Set(textLower.split(/[\s؟?!.,،:;()"']+/).filter(Boolean));
       for (const word of queryWords) {
-        if (textLower.includes(word)) score += 2;
+        if (textTokens.has(word)) {
+          score += 3;
+        } else if (word.length >= 4 && textLower.includes(word)) {
+          score += 1;
+        }
       }
       return { seg, score };
     })
@@ -602,7 +1127,8 @@ export function answerGroundedQuestion(
 
   if (scoredSegments.length === 0) {
     return {
-      answer: `بناءً على النص المفرغ لجلسة "${title}"، لا توجد معلومات كافية للإجابة على سؤال "${question}". لم يرد ذكر مباشر للكلمات المفتاحية المطلوبة في النص.`,
+      answer: "Not mentioned in this recording.",
+      evidenceFound: false,
       citations: [],
     };
   }
@@ -619,10 +1145,11 @@ export function answerGroundedQuestion(
     };
   });
 
-  const quotesText = topMatches.map((m) => `"${m.seg.text}"`).join(" و ");
+  const quotesText = topMatches.map((m) => `"${m.seg.text}"`).join(" | ");
 
   return {
-    answer: `بخصوص "${question}"، يوضح النص المفرغ لجلسة "${title}" أن ${topMatches[0].seg.speaker} صرح بالتالي: ${quotesText}.`,
+    answer: `Based on "${title}", ${topMatches[0].seg.speaker} [${citations[0].timestamp}] stated: ${quotesText}`,
+    evidenceFound: true,
     citations,
   };
 }
@@ -637,6 +1164,7 @@ export async function askMeetMindAI({
   history?: Array<{ role: "user" | "model"; text: string }>;
 }): Promise<{
   answer: string;
+  evidenceFound: boolean;
   citations: { speaker: string; timestamp: string; quote: string }[];
   suggestedFollowUps?: string[];
 }> {
@@ -644,206 +1172,362 @@ export async function askMeetMindAI({
   const lectures = db.get("lectures");
   const tasks = db.get("actionItems");
 
-  // Determine specific targeted resource if any
   const targetMeeting = resourceId ? meetings.find((m) => m.id === resourceId) : undefined;
   const targetLecture = resourceId ? lectures.find((l) => l.id === resourceId) : undefined;
 
-  // If none specified, check latest
+  if (resourceId && !targetMeeting && !targetLecture) {
+    return {
+      answer: "Not mentioned in this recording.",
+      evidenceFound: false,
+      citations: [],
+    };
+  }
+
+  const targetItem = targetLecture || targetMeeting;
+  const targetSegments = targetItem?.segments || [];
+
+  // Optional delegation to Python AI service when configured
+  if (AI_SERVICE_URL && targetItem) {
+    try {
+      const resp = await fetch(`${AI_SERVICE_URL}/api/v1/ask`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: targetItem.title,
+          question,
+          segments: targetSegments,
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (resp.ok) {
+        const data = (await resp.json()) as {
+          answer: string;
+          evidenceFound: boolean;
+          citations: { speaker: string; timestamp: string; quote: string }[];
+        };
+        return {
+          answer: data.evidenceFound ? data.answer : "Not mentioned in this recording.",
+          evidenceFound: data.evidenceFound,
+          citations: data.citations || [],
+        };
+      }
+    } catch {
+      // Fallback seamlessly to Gemini or deterministic transcript search
+    }
+  }
+
   const latestLecture = lectures[0];
   const latestMeeting = meetings[0];
 
-  // Build context summary for Gemini
-  let contextDetails = `[قاعدة بيانات MeetMind AI الحالية]:\n`;
-  contextDetails += `- إجمالي المحاضرات: ${lectures.length}\n`;
-  contextDetails += `- إجمالي الاجتماعات: ${meetings.length}\n`;
-  contextDetails += `- إجمالي المهام والتكليفات: ${tasks.length}\n\n`;
+  if (targetItem && targetSegments.length === 0) {
+    return {
+      answer: "Not mentioned in this recording.",
+      evidenceFound: false,
+      citations: [],
+    };
+  }
 
-  if (targetLecture || latestLecture) {
-    const l = targetLecture || latestLecture;
-    contextDetails += `[تفاصيل المحاضرة: "${l.title}" (كود المادة: ${l.courseCode || "عام"})]:\n`;
-    if (l.summary) contextDetails += `الملخص: ${l.summary}\n`;
-    if (l.examHighlights && l.examHighlights.length > 0) {
-      contextDetails += `نقاط التركيز والامتحان: ${l.examHighlights.join(" | ")}\n`;
-    }
-    if (l.keyConcepts && l.keyConcepts.length > 0) {
-      contextDetails += `المفاهيم الأساسية: ${l.keyConcepts.map((c) => `${c.term}: ${c.definition}`).join("; ")}\n`;
-    }
+  // Build grounded transcript context
+  let contextDetails = "";
+  const lecturesToInclude = targetLecture
+    ? [targetLecture]
+    : targetMeeting
+      ? []
+      : lectures.slice(0, 4);
+  for (const l of lecturesToInclude) {
+    contextDetails += `[Lecture: "${l.title}" (${l.courseCode || "General"}, ${l.date})]:\n`;
+    if (l.summary || l.studyNotes) contextDetails += `Summary: ${l.summary || l.studyNotes}\n`;
     if (l.segments && l.segments.length > 0) {
-      contextDetails += `مقاطع من النص المفرغ للمحاضرة:\n`;
-      l.segments.slice(0, 25).forEach((s) => {
+      contextDetails += `Transcript:\n`;
+      l.segments.slice(0, 60).forEach((s) => {
         const mins = Math.floor(s.startTime / 60);
         const secs = Math.floor(s.startTime % 60);
-        const time = `${mins}:${secs < 10 ? "0" : ""}${secs}`;
-        contextDetails += `[${time}] ${s.speaker}: ${s.text}\n`;
+        contextDetails += `[${mins}:${secs < 10 ? "0" : ""}${secs}] ${s.speaker}: ${s.text}\n`;
       });
     }
     contextDetails += `\n`;
   }
 
-  if (targetMeeting || latestMeeting) {
-    const m = targetMeeting || latestMeeting;
-    contextDetails += `[تفاصيل الاجتماع: "${m.title}" (التاريخ: ${m.date})]:\n`;
-    if (m.summary) contextDetails += `الملخص: ${m.summary}\n`;
-    if (m.keyPoints && m.keyPoints.length > 0) {
-      contextDetails += `النقاط الرئيسية: ${m.keyPoints.join(" | ")}\n`;
-    }
-    if (m.decisions && m.decisions.length > 0) {
-      contextDetails += `القرارات المتخذة: ${m.decisions.join(" | ")}\n`;
-    }
+  const meetingsToInclude = targetMeeting
+    ? [targetMeeting]
+    : targetLecture
+      ? []
+      : meetings.slice(0, 4);
+  for (const m of meetingsToInclude) {
+    contextDetails += `[Meeting: "${m.title}" (${m.date})]:\n`;
+    if (m.summary) contextDetails += `Summary: ${m.summary}\n`;
     if (m.segments && m.segments.length > 0) {
-      contextDetails += `مقاطع من النص المفرغ للاجتماع:\n`;
-      m.segments.slice(0, 25).forEach((s) => {
+      contextDetails += `Transcript:\n`;
+      m.segments.slice(0, 60).forEach((s) => {
         const mins = Math.floor(s.startTime / 60);
         const secs = Math.floor(s.startTime % 60);
-        const time = `${mins}:${secs < 10 ? "0" : ""}${secs}`;
-        contextDetails += `[${time}] ${s.speaker}: ${s.text}\n`;
+        contextDetails += `[${mins}:${secs < 10 ? "0" : ""}${secs}] ${s.speaker}: ${s.text}\n`;
       });
     }
     contextDetails += `\n`;
   }
 
-  if (tasks.length > 0) {
-    contextDetails += `[قائمة المهام المستخرجة حالياً]:\n`;
-    tasks.slice(0, 10).forEach((t) => {
-      contextDetails += `- ${t.title} (المسؤول: ${t.ownerName || "غير محدد"}، تاريخ الاستحقاق: ${t.dueDate || "غير محدد"}، الأولوية: ${t.priority})\n`;
+  if (!targetItem && tasks.length > 0) {
+    contextDetails += `[Extracted Tasks]:\n`;
+    tasks.slice(0, 15).forEach((t) => {
+      contextDetails += `- ${t.title} (Owner: ${t.ownerName || "Unassigned"}, Deadline: ${t.deadlineText || t.dueDate || "Deadline not specified."})\n`;
     });
-    contextDetails += `\n`;
   }
 
   const ai = getGeminiClient();
-  if (ai) {
+  if (ai && contextDetails.trim().length > 0) {
     try {
-      const systemInstruction = `أنت المساعد الذكي المعتمد لمنصة MeetMind AI، المنصة الرائدة في الذكاء الاصطناعي لتفريغ وتحليل الاجتماعات والمحاضرات الجامعية باللغة العربية.
-مهمتك:
-1. التحدث باللغة العربية الفصحى الراقية والواضحة والمباشرة.
-2. إذا كان المستخدم يحييك (مثل: "السلام عليكم"، "أهلاً"، "إزيك"، "صباح الخير")، رد عليه بحفاوة واشرح كيف يمكنك مساعدته في منصة MeetMind AI (تلخيص المحاضرات والاجتماعات، استخراج المهام، توليد الأسئلة والاختبارات، الإجابة عن التفاصيل المذكورة في التسجيلات).
-3. إذا طلب تلخيصاً (مثل "لخص آخر محاضرة" أو "لخص لي الاجتماع")، اعتمد على تفاصيل المحاضرة أو الاجتماع الواردة في السياق، وقدم ملخصاً شاملاً ودقيقاً مقسماً لنقاط أساسية.
-4. إذا طلب أسئلة أو اختباراً (مثل "اعمل لي 10 أسئلة على المحاضرة")، قم بتوليد أسئلة ذكية متنوعة (اختيار من متعدد، وصواب/خطأ، وأسئلة فهم) مستخرجة من محتوى المحاضرة بدقة مع بيان الإجابات الصحيحة.
-5. إذا سأل عن المهام المستخرجة (مثل "إيه المهام اللي اتطلبت في آخر اجتماع؟")، اعرض المهام والمسؤولين والتواريخ المحددة لها بدقة من السياق.
-6. إذا سأل سؤالاً محدداً عن مفهوم أو ما قاله المحاضر (مثل "الدكتور شرح إيه عن قواعد البيانات؟")، استشهد بما قاله المتحدث في النص المفرغ مع الإشارة إلى التوقيت إن توفر.
-7. إذا لم تكن هناك محاضرات أو اجتماعات مسجلة في قاعدة البيانات بعد وسأل عن تسجيل معين، أرشده بلطف لكيفية بدء تسجيل حي من زر التسجيل أو رفع ملف صوتي من زر رفع تسجيل.
-8. إذا كان السؤال عاماً أو تعليمياً، أجب عليه بذكاء وعمق مهني.`;
+      const strictSystemInstruction = `You are the strict transcript-grounded Q&A assistant for MeetMind AI.
+Rules:
+1. Answer ONLY using facts explicitly stated in the provided recording transcript(s) and extracted records below.
+2. NEVER invent, guess, or use external facts when asked about a recording.
+3. If the answer cannot be verified directly from the provided transcript(s), respond EXACTLY with: "Not mentioned in this recording."
+4. Cite speaker names and timestamps [MM:SS] when evidence exists.
+5. Respond in the same language as the user's question (unless refusing with "Not mentioned in this recording.").`;
 
-      const prompt = `${contextDetails}
-[سؤال المستخدم]:
-"${question}"
+      const recentHistory = history
+        .slice(-10)
+        .filter((h) => h.text && h.text.trim())
+        .map((h) => `${h.role === "user" ? "User" : "Assistant"}: ${h.text}`)
+        .join("\n\n");
 
-المطلوب:
-أجب باللغة العربية الفصحى بصياغة ممتازة ومنظمة مع ذكر الاستشهادات الزمنية إن وجدت.`;
+      const prompt = `${contextDetails}\n${recentHistory ? `[History]:\n${recentHistory}\n\n` : ""}[Question]:\n"${question}"`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-3.8-flash",
+        model: "gemini-4-hydrogen",
         contents: prompt,
-        config: {
-          systemInstruction,
-        },
+        config: { systemInstruction: strictSystemInstruction },
       });
 
-      const replyText = response.text || "";
+      const replyText = (response.text || "").trim();
+      const notMentioned =
+        !replyText ||
+        replyText.includes("Not mentioned in this recording") ||
+        replyText.includes("غير مذكور في هذا التسجيل");
 
-      // Extract any citations from target segments
-      const activeSegments =
-        targetLecture?.segments ||
-        targetMeeting?.segments ||
-        latestLecture?.segments ||
-        latestMeeting?.segments ||
-        [];
-
-      let citations: { speaker: string; timestamp: string; quote: string }[] = [];
-      if (activeSegments.length > 0) {
-        const qWords = question
-          .toLowerCase()
-          .split(/\s+/)
-          .filter((w) => w.length > 3);
-        const matches = activeSegments
-          .filter((s) => qWords.some((w) => s.text.toLowerCase().includes(w)))
-          .slice(0, 3);
-
-        citations = matches.map((m) => {
-          const mins = Math.floor(m.startTime / 60);
-          const secs = Math.floor(m.startTime % 60);
-          return {
-            speaker: m.speaker,
-            timestamp: `${mins}:${secs < 10 ? "0" : ""}${secs}`,
-            quote: m.text,
-          };
-        });
+      if (notMentioned) {
+        return {
+          answer: "Not mentioned in this recording.",
+          evidenceFound: false,
+          citations: [],
+        };
       }
+
+      const activeSegments =
+        targetSegments.length > 0
+          ? targetSegments
+          : [...(latestLecture?.segments || []), ...(latestMeeting?.segments || [])];
+
+      const grounded = answerGroundedQuestion(
+        question,
+        activeSegments,
+        targetItem?.title || "Recordings",
+      );
 
       return {
         answer: replyText,
-        citations,
-        suggestedFollowUps: [
-          "لخص لي أهم نقاط الامتحان",
-          "اعمل لي اختبار تقييمي من 5 أسئلة",
-          "إيه المهام والتكليفات المطلوبة؟",
-        ],
+        evidenceFound: true,
+        citations: grounded.citations,
       };
     } catch (err) {
-      console.warn("Gemini query error:", err);
+      console.warn("Gemini query warning:", err);
     }
   }
 
-  // Fallback if Gemini is not responding
-  const cleanQ = question.trim().toLowerCase();
-
-  if (
-    cleanQ.includes("سلام") ||
-    cleanQ.includes("مرحبا") ||
-    cleanQ.includes("ازيك") ||
-    cleanQ.includes("أهلا")
-  ) {
-    return {
-      answer: `وعليكم السلام ورحمة الله وبركاته! أهلاً بك في منصة MeetMind AI. أنا مساعدك الذكي لتفريغ وتحليل المحاضرات والاجتماعات.\n\nيمكنني مساعدتك في:\n1. تلخيص المحاضرات والاجتماعات المسجلة بدقة.\n2. استخراج المهام والتكليفات والمسؤولين عنها.\n3. توليد أسئلة كويز واختبارات ذكية على محتوى الشرح.\n4. الإجابة عن أي تساؤل حول ما قاله المحاضر أو المتحدثون مع التوثيق الزمني.`,
-      citations: [],
-      suggestedFollowUps: [
-        "لخص لي آخر محاضرة",
-        "اعمل لي 10 أسئلة على المحاضرة",
-        "إيه المهام المطلوبة؟",
-      ],
-    };
+  // Deterministic grounded transcript search fallback (never fabricates answers)
+  if (targetItem) {
+    return answerGroundedQuestion(question, targetSegments, targetItem.title);
   }
 
-  if (cleanQ.includes("لخص") || cleanQ.includes("ملخص")) {
-    const item = targetLecture || latestLecture || targetMeeting || latestMeeting;
-    if (item && item.summary) {
-      return {
-        answer: `ملخص "${item.title}":\n\n${item.summary}\n\n${item.keyPoints ? "النقاط الأساسية:\n" + item.keyPoints.map((p) => `• ${p}`).join("\n") : ""}`,
-        citations: [],
-      };
-    }
-    return {
-      answer: `لا توجد تسجيلات جاهزة حالياً في المنصة للتلخيص. يمكنك بدء تسجيل حي جديد من زر التسجيل أو رفع ملف صوتي للبدء.`,
-      citations: [],
-    };
-  }
-
-  if (cleanQ.includes("مهم") || cleanQ.includes("مهام") || cleanQ.includes("تكليف")) {
-    if (tasks.length > 0) {
-      const taskList = tasks
-        .map(
-          (t) =>
-            `• ${t.title} — المسؤول: ${t.ownerName || "غير محدد"} (تاريخ التسليم: ${t.dueDate || "غير محدد"})`,
-        )
-        .join("\n");
-      return {
-        answer: `إليك قائمة بالمهام والتكليفات المستخرجة من الجلسات:\n\n${taskList}`,
-        citations: [],
-      };
-    }
-    return {
-      answer: `لم يتم استخراج مهام بعد، أو لا توجد تسجيلات سابقة. عند رفع أي تسجيل سيقوم الذكاء الاصطناعي باستخراج المهام والتكليفات تلقائياً.`,
-      citations: [],
-    };
-  }
-
-  const active = targetLecture || targetMeeting || latestLecture || latestMeeting;
-  if (active && active.segments.length > 0) {
-    return answerGroundedQuestion(question, active.segments, active.title);
+  const allActive = [...(latestLecture?.segments || []), ...(latestMeeting?.segments || [])];
+  if (allActive.length > 0) {
+    return answerGroundedQuestion(
+      question,
+      allActive,
+      latestLecture?.title || latestMeeting?.title || "Recordings",
+    );
   }
 
   return {
-    answer: `مرحباً بك! أنا مساعد MeetMind AI الذكي. المنصة جاهزة حالياً ومستعدة للعمل. يمكنك تسجيل محاضرة أو اجتماع جديد، أو رفع ملف صوتي لتفريغه وتحليله وتوليد الاختبارات والمهام آلياً.`,
+    answer: "Not mentioned in this recording.",
+    evidenceFound: false,
     citations: [],
+  };
+}
+
+// Generate Spaced Repetition Flashcards Grounded in Transcript
+export async function generateAiFlashcards(
+  title: string,
+  segments: TranscriptSegment[],
+  summaryText?: string,
+  courseCode?: string,
+): Promise<Array<{ front: string; back: string }>> {
+  const detectedLang = detectTranscriptLanguage(title, segments);
+  const ai = getGeminiClient();
+
+  if (ai && segments.length > 0) {
+    try {
+      const preparedTranscript = await prepareTranscriptForLlm(ai, title, segments, 24000);
+      const langDirective =
+        detectedLang === "en"
+          ? "Generate all flashcard fronts and backs in clear English matching the transcript."
+          : "أنشئ البطاقات باللغة العربية مع الحفاظ على المصطلحات التقنية كما وردت.";
+      const prompt = `أنت خبير في تقنيات الاستذكار والتعلم المتباعد (Spaced Repetition) في منصة MeetMind AI.
+المهمة الصارمة: أنشئ ما بين 6 إلى 10 بطاقات تعليمية (Flashcards) مستخلصة وموثقة بنسبة 100% من محتوى الجلسة التالية: "${title}".
+${langDirective}
+القواعد:
+1. الوجه الأمامي (front): سؤال واضح أو مصطلح محوري ورد في الجلسة.
+2. الوجه الخلفي (back): إجابة دقيقة وموجزة مستندة للنص المفرغ فقط.
+3. لا تختلق أي معلومة لم تذكر في النص المفرغ.
+
+النص المفرغ:
+"""
+${preparedTranscript}
+"""
+
+الملخص التوجيهي:
+"""
+${summaryText || ""}
+"""
+
+المطلوب إرجاع مصفوفة JSON فقط بالشكل التالي:
+[
+  {
+    "front": "...",
+    "back": "..."
+  }
+]`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-4-hydrogen",
+        contents: prompt,
+        config: { responseMimeType: "application/json" },
+      });
+
+      const parsed = JSON.parse(response.text || "[]");
+      if (Array.isArray(parsed) && parsed.length >= 3) {
+        return parsed
+          .map((item) => ({
+            front: String(item.front || "").trim(),
+            back: String(item.back || "").trim(),
+          }))
+          .filter((c) => c.front && c.back);
+      }
+    } catch (err) {
+      console.warn("Gemini flashcards generation error, using grounded extractor:", err);
+    }
+  }
+
+  // Deterministic Grounded Fallback
+  const valid = segments.filter((s) => s.text && s.text.length > 20);
+  const pool = valid.length >= 4 ? valid : segments;
+  return pool.slice(0, 6).map((seg) => ({
+    front:
+      detectedLang === "en"
+        ? `What point was covered at [${Math.floor(seg.startTime / 60)}:${Math.floor(
+            seg.startTime % 60,
+          )
+            .toString()
+            .padStart(2, "0")}] in "${title}"?`
+        : `ما هو المفهوم الذي تم تناوله في الجزء [${Math.floor(seg.startTime / 60)}:${Math.floor(
+            seg.startTime % 60,
+          )
+            .toString()
+            .padStart(2, "0")}] من "${title}"؟`,
+    back: seg.text,
+  }));
+}
+
+// Generate Hierarchical Knowledge Graph (Mind Map) Grounded in Transcript
+export async function generateAiMindMap(
+  title: string,
+  segments: TranscriptSegment[],
+  summaryText?: string,
+  courseCode?: string,
+): Promise<MindMapNode> {
+  const detectedLang = detectTranscriptLanguage(title, segments);
+  const ai = getGeminiClient();
+
+  if (ai && segments.length > 0) {
+    try {
+      const preparedTranscript = await prepareTranscriptForLlm(ai, title, segments, 24000);
+      const langDirective =
+        detectedLang === "en"
+          ? "Generate all node labels and descriptions in clear English matching the transcript."
+          : "اجعل عناوين العقد والأوصاف باللغة العربية مع الإبقاء على المصطلحات التقنية كما وردت.";
+      const prompt = `أنت خبير الخرائط الذهنية ورسم العلاقات المعرفية في منصة MeetMind AI.
+المهمة الصارمة: أنشئ خريطة ذهنية هرمية شاملة ودقيقة تلخص الجلسة: "${title}" ${courseCode ? `(${courseCode})` : ""} بناءً على النص المفرغ فقط.
+${langDirective}
+القواعد:
+1. العقدة الجذرية (Root): عنوان الجلسة مع وصف موجز.
+2. الفروع الرئيسية (Main Branches): من 3 إلى 5 فروع تغطي المحاور الفعلية في النص.
+3. الفروع الفرعية (Sub-nodes): كل فرع رئيسي يتفرع منه من 2 إلى 4 عقد فرعية مستفادة من النص المفرغ.
+4. كل عقدة تتضمن: "id", "label", "description", "children".
+
+النص المفرغ:
+"""
+${preparedTranscript}
+"""
+
+الملخص:
+"""
+${summaryText || ""}
+"""
+
+المطلوب إرجاع كائن JSON يمثل العقدة الجذرية بالهيكل الموضح.`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-4-hydrogen",
+        contents: prompt,
+        config: { responseMimeType: "application/json" },
+      });
+
+      const parsed = JSON.parse(response.text || "{}");
+      if (parsed.label && Array.isArray(parsed.children) && parsed.children.length > 0) {
+        return parsed as MindMapNode;
+      }
+    } catch (err) {
+      console.warn("Gemini mind map generation error, using grounded extractor:", err);
+    }
+  }
+
+  // Deterministic Grounded Fallback
+  return {
+    id: `root_${Date.now()}`,
+    label: title,
+    description: `خريطة المفاهيم والعلاقات المستخرجة من جلسة ${title}`,
+    children: [
+      {
+        id: `node_intro_${Date.now()}`,
+        label: "المقدمة والمنطلقات",
+        description: segments[0]?.text?.slice(0, 100) || "مقدمة الجلسة والمحاور المستهدفة",
+        children: segments.slice(0, 2).map((s, idx) => ({
+          id: `node_intro_sub_${idx}`,
+          label: `نقطة ${idx + 1}`,
+          description: s.text,
+        })),
+      },
+      {
+        id: `node_core_${Date.now()}`,
+        label: "الصلب النظري والمفاهيم",
+        description: "المفاهيم والنقاط الجوهرية المطروحة في النقاش",
+        children: segments.slice(2, 5).map((s, idx) => ({
+          id: `node_core_sub_${idx}`,
+          label: `مفهوم ${idx + 1}`,
+          description: s.text,
+        })),
+      },
+      {
+        id: `node_concl_${Date.now()}`,
+        label: "التطبيقات والتوصيات",
+        description:
+          segments[segments.length - 1]?.text?.slice(0, 100) || "خلاصة المخرجات والتوصيات العملية",
+        children: segments.slice(-2).map((s, idx) => ({
+          id: `node_concl_sub_${idx}`,
+          label: `توصية ${idx + 1}`,
+          description: s.text,
+        })),
+      },
+    ],
   };
 }

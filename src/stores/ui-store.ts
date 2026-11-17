@@ -2,6 +2,38 @@ import { create } from "zustand";
 
 export type Theme = "light" | "dark" | "system";
 
+export type AudioSystemMode =
+  | "Ready"
+  | "Listening"
+  | "Recording"
+  | "Uploading"
+  | "Processing"
+  | "Transcribing"
+  | "Analyzing"
+  | "Completed";
+
+/**
+ * High-frequency mutable telemetry object read directly by Canvas/WebGL requestAnimationFrame loops
+ * without triggering React component re-renders on every frame (60fps zero-lag architecture).
+ */
+export const liveAudioTelemetry = {
+  active: false,
+  rms: 0, // 0.0 to 1.0 normalized root-mean-square amplitude
+  peak: 0, // 0.0 to 1.0 peak amplitude
+  bands: new Float32Array(32), // 32 normalized frequency bins (0.0 to 1.0)
+  waveform: new Float32Array(64), // 64 normalized time-domain samples (-1.0 to 1.0)
+  updatedAt: 0,
+};
+
+export function resetLiveAudioTelemetry() {
+  liveAudioTelemetry.active = false;
+  liveAudioTelemetry.rms = 0;
+  liveAudioTelemetry.peak = 0;
+  liveAudioTelemetry.bands.fill(0);
+  liveAudioTelemetry.waveform.fill(0);
+  liveAudioTelemetry.updatedAt = Date.now();
+}
+
 type UIState = {
   sidebarCollapsed: boolean;
   mobileSidebarOpen: boolean;
@@ -13,7 +45,11 @@ type UIState = {
   hydrateTheme: () => void;
   recordingDialogOpen: boolean;
   setRecordingDialogOpen: (v: boolean) => void;
+  audioSystemMode: AudioSystemMode;
+  audioJobProgress: number;
+  setAudioSystemState: (mode: AudioSystemMode, progress?: number) => void;
   language: string;
+  hydrateLanguage: () => void;
   workspace: string;
   setSidebarCollapsed: (v: boolean) => void;
   toggleSidebar: () => void;
@@ -63,7 +99,29 @@ export const useUIStore = create<UIState>((set) => ({
   },
   recordingDialogOpen: false,
   setRecordingDialogOpen: (v) => set({ recordingDialogOpen: v }),
-  language: (typeof window !== "undefined" && localStorage.getItem("meetmind-lang")) || "EN",
+  audioSystemMode: "Ready",
+  audioJobProgress: 0,
+  setAudioSystemState: (mode, progress) =>
+    set((s) => ({
+      audioSystemMode: mode,
+      audioJobProgress: progress !== undefined ? progress : s.audioJobProgress,
+    })),
+  language: "EN",
+  hydrateLanguage: () => {
+    try {
+      if (typeof window === "undefined") return;
+      const stored = localStorage.getItem("meetmind-lang");
+      if (stored === "AR" || stored === "EN") {
+        set({ language: stored });
+        if (typeof document !== "undefined") {
+          document.documentElement.dir = stored === "AR" ? "rtl" : "ltr";
+          document.documentElement.lang = stored === "AR" ? "ar" : "en";
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  },
   workspace: "Acme University",
   setSidebarCollapsed: (v) => set({ sidebarCollapsed: v }),
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),

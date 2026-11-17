@@ -81,46 +81,62 @@ export function AppSidebar({ variant = "desktop" }: { variant?: "desktop" | "mob
         className={cn(
           "flex h-full flex-col bg-sidebar/80 backdrop-blur-xl",
           isRtl ? "border-l border-sidebar-border" : "border-r border-sidebar-border",
-          variant === "desktop" ? (collapsed ? "w-[76px]" : "w-[260px]") : "w-full",
+          variant === "desktop" ? (collapsed ? "w-[64px]" : "w-[220px]") : "w-full",
           "transition-[width] duration-300 ease-out",
         )}
       >
-        <div className="flex items-center justify-between gap-2 px-4 pt-5 pb-3">
-          <Logo compact={collapsed} />
-          {variant === "desktop" && (
+        <div
+          className={cn(
+            "relative flex flex-col items-center justify-center border-b border-sidebar-border/30 pb-3.5 pt-4",
+            collapsed ? "px-2" : "px-3",
+          )}
+        >
+          {variant === "desktop" && !collapsed && (
             <button
               type="button"
               onClick={toggle}
               className={cn(
-                "grid h-8 w-8 place-items-center rounded-lg text-muted-foreground hover:bg-sidebar-accent hover:text-foreground transition",
-                collapsed && (isRtl ? "-rotate-180" : "rotate-180"),
+                "absolute top-3.5 grid h-7.5 w-7.5 place-items-center rounded-lg text-zinc-400 hover:bg-sidebar-accent hover:text-foreground transition cursor-pointer z-10",
+                isRtl ? "left-2.5" : "right-2.5",
               )}
               aria-label="Toggle sidebar"
+              title="Collapse sidebar"
             >
               <ChevronsLeft className={cn("h-4 w-4", isRtl && "rotate-180")} />
             </button>
           )}
-        </div>
-
-        <div className="px-3">
-          <WorkspaceSwitcher collapsed={collapsed} />
+          {variant === "desktop" && collapsed && (
+            <button
+              type="button"
+              onClick={toggle}
+              className="mb-1.5 grid h-7 w-7 place-items-center rounded-md text-zinc-400 hover:bg-sidebar-accent hover:text-foreground transition cursor-pointer"
+              title="Expand sidebar"
+            >
+              <ChevronsLeft className={cn("h-4 w-4", !isRtl && "rotate-180")} />
+            </button>
+          )}
+          <Logo compact={collapsed} />
         </div>
 
         <div className="px-3 pt-3">
           <Button
             onClick={() => setRecordingDialogOpen(true)}
             className={cn(
-              "w-full gap-2 gradient-primary text-primary-foreground hover:opacity-95 shadow-glow cursor-pointer",
+              "w-full h-9 gap-2 gradient-primary text-primary-foreground hover:opacity-95 shadow-glow cursor-pointer text-xs sm:text-sm font-extrabold",
               collapsed && "px-0",
             )}
           >
-            <Plus className="h-4 w-4" />
-            {!collapsed && <span className="text-sm font-medium">{t("newRecording")}</span>}
+            <Plus className="h-4 w-4 stroke-[2.5]" />
+            {!collapsed && (
+              <span className="text-xs sm:text-sm font-extrabold tracking-wide">
+                {t("newRecording")}
+              </span>
+            )}
           </Button>
         </div>
 
-        <ScrollArea className="mt-4 flex-1 px-2">
-          <nav className="space-y-6 pb-6">
+        <ScrollArea className="mt-3 flex-1 px-2">
+          <nav className="space-y-4 pb-5">
             {NAV_GROUPS.map((group) => {
               const items = NAV_ITEMS.filter((i) => i.group === group.key);
               const groupLabel = groupKeyToI18n[group.key]
@@ -129,11 +145,11 @@ export function AppSidebar({ variant = "desktop" }: { variant?: "desktop" | "mob
               return (
                 <div key={group.key}>
                   {!collapsed && (
-                    <div className="px-3 pb-1.5 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
+                    <div className="px-2 pb-1.5 pt-0.5 text-[11px] font-black uppercase tracking-wider text-amber-400 drop-shadow-sm">
                       {groupLabel}
                     </div>
                   )}
-                  <ul className="space-y-0.5">
+                  <ul className="space-y-1">
                     {items.map((item) => {
                       const Icon = item.icon;
                       const active =
@@ -145,10 +161,11 @@ export function AppSidebar({ variant = "desktop" }: { variant?: "desktop" | "mob
                         <Link
                           to={item.to}
                           className={cn(
-                            "group relative flex items-center gap-3 rounded-xl px-3 py-2 text-sm text-sidebar-foreground/85 outline-none transition",
-                            "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+                            "group relative flex items-center gap-2.5 rounded-lg px-2.5 py-1.75 text-[13.5px] font-semibold text-zinc-100 outline-none transition-all",
+                            "hover:bg-zinc-800/80 hover:text-amber-300",
                             "focus-visible:ring-2 focus-visible:ring-ring/60",
-                            active && "bg-sidebar-accent text-sidebar-accent-foreground",
+                            active &&
+                              "bg-amber-500/15 text-amber-300 font-extrabold border border-amber-500/30 shadow-sm",
                             collapsed && "justify-center px-0",
                           )}
                         >
@@ -156,7 +173,7 @@ export function AppSidebar({ variant = "desktop" }: { variant?: "desktop" | "mob
                             <motion.span
                               layoutId="sidebar-active"
                               className={cn(
-                                "absolute inset-y-1 w-[3px] rounded-full gradient-primary",
+                                "absolute inset-y-1 w-[3.5px] rounded-full gradient-primary shadow-[0_0_8px_#f59e0b]",
                                 isRtl ? "right-0" : "left-0",
                               )}
                               transition={{ type: "spring", stiffness: 500, damping: 40 }}
@@ -164,10 +181,10 @@ export function AppSidebar({ variant = "desktop" }: { variant?: "desktop" | "mob
                           )}
                           <Icon
                             className={cn(
-                              "h-[18px] w-[18px] shrink-0",
+                              "h-[19px] w-[19px] shrink-0 transition-colors",
                               active
-                                ? "text-primary"
-                                : "text-muted-foreground group-hover:text-foreground",
+                                ? "text-amber-400 drop-shadow-[0_0_6px_rgba(245,158,11,0.6)]"
+                                : "text-zinc-300 group-hover:text-amber-300",
                             )}
                           />
                           {!collapsed && (
@@ -177,7 +194,7 @@ export function AppSidebar({ variant = "desktop" }: { variant?: "desktop" | "mob
                                 <Badge
                                   variant="secondary"
                                   className={cn(
-                                    "h-5 rounded-full border-border/70 bg-background/70 px-2 text-[10.5px] font-medium",
+                                    "h-5 px-2 rounded-full border border-amber-500/40 bg-zinc-900/90 text-[10.5px] font-black text-amber-300 shadow-sm",
                                     isRtl ? "mr-auto" : "ml-auto",
                                     typeof badge === "string" &&
                                       "gradient-primary text-primary-foreground border-transparent",
