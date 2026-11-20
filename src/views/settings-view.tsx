@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { Link } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   Bell,
@@ -36,6 +37,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { api } from "@/lib/api-client";
+import { useAuthStore } from "@/stores/auth-store";
 import { toast } from "sonner";
 const SECTIONS = [
   { key: "appearance", icon: Palette, title: "Appearance", desc: "Theme, density, motion" },
@@ -47,8 +49,13 @@ const SECTIONS = [
 
 export default function SettingsView() {
   const queryClient = useQueryClient();
+  const authUser = useAuthStore((s) => s.user);
+  const setAuthUser = useAuthStore((s) => s.setUser);
+  const isGuest = Boolean(authUser?.isGuest);
+
   const [activeTab, setActiveTab] = useState("appearance");
-  const [displayName, setDisplayName] = useState("Alex Kim");
+  const [displayName, setDisplayName] = useState(authUser?.name || "");
+  const [savingSettings, setSavingSettings] = useState(false);
   const [emailDigest, setEmailDigest] = useState(true);
   const [reducedMotion, setReducedMotion] = useState(false);
   const [compactDensity, setCompactDensity] = useState(false);
@@ -58,6 +65,12 @@ export default function SettingsView() {
   const [isResetting, setIsResetting] = useState(false);
   const [deleteRecordingsOpen, setDeleteRecordingsOpen] = useState(false);
   const [isDeletingRecordings, setIsDeletingRecordings] = useState(false);
+
+  useEffect(() => {
+    if (authUser?.name) {
+      setDisplayName(authUser.name);
+    }
+  }, [authUser?.name]);
 
   const handleDeleteAllRecordings = async () => {
     setIsDeletingRecordings(true);
@@ -89,8 +102,21 @@ export default function SettingsView() {
     }
   };
 
-  const handleSave = () => {
-    toast.success("Settings updated successfully");
+  const handleSave = async () => {
+    setSavingSettings(true);
+    try {
+      const trimmed = displayName.trim();
+      if (!isGuest && authUser && trimmed.length >= 2 && trimmed !== authUser.name) {
+        const res = await api.updateProfile({ name: trimmed });
+        setAuthUser(res.user);
+        queryClient.invalidateQueries({ queryKey: ["profile"] });
+      }
+      toast.success("Settings saved successfully");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to save settings");
+    } finally {
+      setSavingSettings(false);
+    }
   };
 
   return (
@@ -155,7 +181,12 @@ export default function SettingsView() {
                 </div>
                 <div className="space-y-1.5">
                   <Label>Display Name</Label>
-                  <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+                  <Input
+                    value={displayName}
+                    onChange={(e) => setDisplayName(e.target.value)}
+                    disabled={isGuest}
+                    placeholder={isGuest ? "Guest User (sign in to edit)" : "Your full name"}
+                  />
                 </div>
               </div>
             </div>
@@ -225,19 +256,39 @@ export default function SettingsView() {
           {activeTab === "security" && (
             <div className="space-y-5">
               <div className="font-display text-lg font-semibold">Security & Access Control</div>
-              <div className="rounded-xl border border-success/30 bg-success/5 p-4 text-xs space-y-2">
-                <div className="font-semibold text-success flex items-center gap-1.5">
-                  <ShieldCheck className="h-4 w-4" /> Role-Based Access Control (RBAC) Active
+              <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-4 text-xs space-y-2">
+                <div className="font-semibold text-emerald-400 flex items-center gap-1.5">
+                  <ShieldCheck className="h-4 w-4" /> Authenticated Session Isolation Active
                 </div>
                 <p className="text-muted-foreground leading-relaxed">
-                  Your session is authenticated as <b>alex.kim@acme.edu</b> (Admin). Meeting
-                  recordings and student lecture notes are strictly isolated within your
-                  organization workspace.
+                  {isGuest ? (
+                    <>
+                      You are currently browsing in an isolated <b>Guest Session</b>. Sign in or
+                      create an account to save your profile, change passwords, and manage devices.
+                    </>
+                  ) : (
+                    <>
+                      Your session is authenticated as{" "}
+                      <b className="text-foreground">{authUser?.email || "Authenticated User"}</b> (
+                      <span className="capitalize">{authUser?.role || "member"}</span> ·{" "}
+                      {authUser?.authProvider === "google" ? "Google OAuth" : "Email & Password"}).
+                      Your recordings, transcripts, and AI outputs are strictly isolated to your
+                      account.
+                    </>
+                  )}
                 </p>
               </div>
-              <div className="space-y-1.5">
-                <Label>Current Password</Label>
-                <Input type="password" placeholder="••••••••••••" />
+              <div className="rounded-xl border border-border/60 bg-secondary/20 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold">Password & Active Session Management</div>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Update your password, inspect active login sessions, revoke other devices, or
+                    export your personal data from your Profile security hub.
+                  </p>
+                </div>
+                <Button asChild variant="outline" size="sm" className="shrink-0">
+                  <Link to="/profile">Manage in Profile</Link>
+                </Button>
               </div>
             </div>
           )}
@@ -308,7 +359,7 @@ export default function SettingsView() {
                       <AlertTriangle className="h-4 w-4" /> Reset Workspace to Zero
                     </div>
                     <div className="text-xs text-muted-foreground mt-0.5 leading-relaxed">
-                      Permanently wipes all demo and real recordings, transcripts, quizzes, and
+                      Permanently wipes all recordings, transcripts, quizzes, flashcards, and
                       analytics so you can start fresh.
                     </div>
                   </div>
@@ -326,14 +377,21 @@ export default function SettingsView() {
           )}
 
           <div className="pt-6 flex justify-end gap-2 border-t border-border/40 mt-6">
-            <Button variant="outline" onClick={() => toast.info("Changes reverted")}>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setDisplayName(authUser?.name || "");
+                toast.info("Changes reverted");
+              }}
+            >
               Cancel
             </Button>
             <Button
-              onClick={handleSave}
-              className="gradient-primary text-primary-foreground shadow-glow"
+              onClick={() => void handleSave()}
+              disabled={savingSettings}
+              className="gradient-primary text-primary-foreground shadow-glow cursor-pointer"
             >
-              <Check className="h-4 w-4 mr-1.5" /> Save Changes
+              <Check className="h-4 w-4 mr-1.5" /> {savingSettings ? "Saving..." : "Save Changes"}
             </Button>
           </div>
         </GlassCard>

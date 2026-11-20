@@ -9,13 +9,13 @@ namespace MeetMind.Api.Services
         Guid UserId { get; }
         bool IsAuthenticated { get; }
         bool IsAdmin { get; }
+        bool IsGuest { get; }
         string Email { get; }
     }
 
     public class CurrentUserService : ICurrentUserService
     {
         private readonly IHttpContextAccessor _httpContextAccessor;
-        private static readonly Guid FallbackDevUserId = Guid.Parse("11111111-1111-1111-1111-111111111111");
 
         public CurrentUserService(IHttpContextAccessor httpContextAccessor)
         {
@@ -30,6 +30,11 @@ namespace MeetMind.Api.Services
         {
             get
             {
+                if (!IsAuthenticated)
+                {
+                    return Guid.Empty;
+                }
+
                 var claim = Principal?.FindFirst(ClaimTypes.NameIdentifier)?.Value
                     ?? Principal?.FindFirst("sub")?.Value;
                 if (Guid.TryParse(claim, out var parsed))
@@ -37,21 +42,25 @@ namespace MeetMind.Api.Services
                     return parsed;
                 }
 
-                var headerId = _httpContextAccessor.HttpContext?.Request.Headers["X-User-Id"].ToString();
-                if (Guid.TryParse(headerId, out var headerGuid))
-                {
-                    return headerGuid;
-                }
-
-                return FallbackDevUserId;
+                return Guid.Empty;
             }
         }
 
+        public bool IsGuest =>
+            IsAuthenticated &&
+            (string.Equals(Principal?.FindFirst("is_guest")?.Value, "true", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(Principal?.FindFirst(ClaimTypes.Role)?.Value, "Guest", StringComparison.OrdinalIgnoreCase));
+
         public bool IsAdmin =>
-            Principal?.IsInRole("Admin") == true ||
-            string.Equals(Principal?.FindFirst(ClaimTypes.Role)?.Value, "Admin", StringComparison.OrdinalIgnoreCase);
+            IsAuthenticated &&
+            !IsGuest &&
+            (Principal?.IsInRole("Admin") == true ||
+             string.Equals(Principal?.FindFirst(ClaimTypes.Role)?.Value, "Admin", StringComparison.OrdinalIgnoreCase));
 
         public string Email =>
-            Principal?.FindFirst(ClaimTypes.Email)?.Value ?? "alex.kim@acme.edu";
+            IsAuthenticated
+                ? Principal?.FindFirst(ClaimTypes.Email)?.Value ?? string.Empty
+                : string.Empty;
     }
 }
+

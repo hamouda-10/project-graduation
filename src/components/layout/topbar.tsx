@@ -1,16 +1,76 @@
-import { Menu, Search, Sparkles, Settings, Command as CmdIcon, Mic, Calendar } from "lucide-react";
+import { useState, useRef, useEffect } from "react";
+import {
+  Menu,
+  Search,
+  Sparkles,
+  Settings,
+  Command as CmdIcon,
+  Mic,
+  Calendar,
+  LogOut,
+  User as UserIcon,
+  LogIn,
+  ShieldCheck,
+} from "lucide-react";
 import { LanguageSwitch } from "@/components/topbar/language-switch";
 import { NotificationsButton } from "@/components/topbar/notifications-button";
+import { UserAvatar } from "@/components/auth/user-avatar";
 import { useUIStore } from "@/stores/ui-store";
+import { useAuthStore } from "@/stores/auth-store";
 import { useTranslation } from "@/lib/i18n";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
+import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 
 export function Topbar() {
   const openCommand = useUIStore((s) => s.setCommandOpen);
   const openMobile = useUIStore((s) => s.setMobileSidebarOpen);
   const openAI = useUIStore((s) => s.setAiDockOpen);
   const setRecordingOpen = useUIStore((s) => s.setRecordingDialogOpen);
+  const user = useAuthStore((s) => s.user);
+  const authStatus = useAuthStore((s) => s.status);
+  const logout = useAuthStore((s) => s.logout);
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const { t, language } = useTranslation();
+
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const accountMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!accountOpen) return;
+    const handleOutside = (e: MouseEvent) => {
+      if (accountMenuRef.current && !accountMenuRef.current.contains(e.target as Node)) {
+        setAccountOpen(false);
+      }
+    };
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setAccountOpen(false);
+    };
+    document.addEventListener("mousedown", handleOutside);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("mousedown", handleOutside);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [accountOpen]);
+
+  const handleSignOut = async () => {
+    if (signingOut) return;
+    setSigningOut(true);
+    setAccountOpen(false);
+    try {
+      await logout();
+      queryClient.clear();
+      toast.success(language === "AR" ? "تم تسجيل الخروج بنجاح" : "Signed out successfully");
+      void navigate({ to: "/login" as never, replace: true });
+    } finally {
+      setSigningOut(false);
+    }
+  };
+
+  const isGuest = authStatus === "guest" || Boolean(user?.isGuest);
 
   let recordTitle = "Start New Recording or Upload";
   if (language === "AR") {
@@ -112,6 +172,109 @@ export function Topbar() {
         >
           <Settings className="h-4 w-4" />
         </Link>
+
+        {/* Account & Sign Out Menu */}
+        {user && (
+          <div className="relative" ref={accountMenuRef}>
+            <button
+              type="button"
+              onClick={() => setAccountOpen((prev) => !prev)}
+              aria-expanded={accountOpen}
+              aria-haspopup="menu"
+              aria-label={language === "AR" ? "حساب المستخدم" : "Account menu"}
+              className="flex h-9 items-center gap-2 rounded-lg border border-amber-500/30 bg-zinc-950/85 px-2 text-xs font-semibold text-zinc-100 transition-all hover:border-amber-400/60 hover:bg-zinc-900 cursor-pointer shadow-sm"
+            >
+              <UserAvatar
+                avatarUrl={user.avatarUrl}
+                name={user.name}
+                initials={user.initials}
+                className="h-6 w-6 rounded-md border border-amber-500/40 text-[11px]"
+              />
+              {isGuest && (
+                <span className="hidden xl:inline text-[11px] font-medium text-amber-300/90">
+                  {language === "AR" ? "ضيف" : "Guest"}
+                </span>
+              )}
+            </button>
+
+            {accountOpen && (
+              <div
+                role="menu"
+                className="absolute right-0 mt-2 w-64 rounded-xl border border-amber-500/25 bg-[#0c0c10]/98 p-2 shadow-2xl shadow-black/70 backdrop-blur-xl z-50"
+              >
+                <div className="border-b border-zinc-800/80 px-2.5 py-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="truncate text-sm font-semibold text-zinc-100">{user.name}</p>
+                    <span className="shrink-0 rounded-md border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-300">
+                      {isGuest ? (language === "AR" ? "ضيف" : "Guest") : user.role}
+                    </span>
+                  </div>
+                  <p className="mt-0.5 truncate text-xs text-zinc-400">
+                    {isGuest
+                      ? language === "AR"
+                        ? "جلسة ضيف مؤقتة ومعزولة"
+                        : "Temporary isolated guest session"
+                      : user.email}
+                  </p>
+                </div>
+
+                <div className="mt-1.5 space-y-1">
+                  {isGuest ? (
+                    <Link
+                      to={"/login" as never}
+                      onClick={() => setAccountOpen(false)}
+                      role="menuitem"
+                      className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-xs font-medium text-amber-300 transition-colors hover:bg-amber-500/10"
+                    >
+                      <LogIn className="h-3.5 w-3.5" />
+                      <span>
+                        {language === "AR"
+                          ? "تسجيل الدخول أو إنشاء حساب"
+                          : "Sign in or Create Account"}
+                      </span>
+                    </Link>
+                  ) : (
+                    <Link
+                      to="/profile"
+                      onClick={() => setAccountOpen(false)}
+                      role="menuitem"
+                      className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-800/80"
+                    >
+                      <UserIcon className="h-3.5 w-3.5 text-amber-400" />
+                      <span>{language === "AR" ? "الملف الشخصي" : "Profile"}</span>
+                      {user.authProvider === "google" && (
+                        <ShieldCheck className="ml-auto h-3.5 w-3.5 text-emerald-400" />
+                      )}
+                    </Link>
+                  )}
+
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={signingOut}
+                    onClick={() => void handleSignOut()}
+                    className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-xs font-medium text-red-400 transition-colors hover:bg-red-500/10 disabled:opacity-60 cursor-pointer"
+                  >
+                    <LogOut className="h-3.5 w-3.5" />
+                    <span>
+                      {signingOut
+                        ? language === "AR"
+                          ? "جارٍ تسجيل الخروج..."
+                          : "Signing out..."
+                        : isGuest
+                          ? language === "AR"
+                            ? "إنهاء جلسة الضيف"
+                            : "Exit Guest Session"
+                          : language === "AR"
+                            ? "تسجيل الخروج"
+                            : "Sign out"}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </header>
   );

@@ -23,6 +23,13 @@ SUPPORTED_MIME_PREFIXES = (
     "application/octet-stream",
 )
 
+BLOCKED_NON_MEDIA_EXTENSIONS = {
+    ".txt", ".md", ".csv", ".json", ".xml", ".html", ".htm", ".css", ".js", ".ts",
+    ".py", ".cs", ".java", ".sh", ".bat", ".exe", ".dll", ".zip", ".rar", ".7z",
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".bmp", ".webp",
+}
+
 MIN_DURATION_SECONDS = 0.5
 DEFAULT_MAX_SIZE_MB = int(os.environ.get("MAX_RECORDING_SIZE_MB", "500"))
 
@@ -62,7 +69,7 @@ def validate_file_descriptor(
         raise MediaValidationError("Filename is required.", "ValidationError", 400)
 
     ext = os.path.splitext(filename)[1].lower()
-    if ext not in SUPPORTED_EXTENSIONS:
+    if ext in BLOCKED_NON_MEDIA_EXTENSIONS:
         raise MediaValidationError("Unsupported audio format.", "UnsupportedFormat", 400)
 
     if content_type:
@@ -90,30 +97,38 @@ def probe_media_file(file_path: str) -> MediaMetadata:
     cmd = [
         "ffprobe",
         "-v", "error",
+        "-analyzeduration", "100M",
+        "-probesize", "100M",
         "-show_entries",
-        "format=duration,format_name,bit_rate:stream=index,codec_type,codec_name,sample_rate,channels",
+        "format=duration,format_name,bit_rate:stream=index,codec_type,codec_name,sample_rate,channels,duration",
         "-of", "json",
         file_path,
     ]
-    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+    except FileNotFoundError:
+        raise MediaValidationError("FFmpeg/FFprobe binary is unavailable on the server.", "FFmpegUnavailable", 503)
+    except subprocess.TimeoutExpired:
+        raise MediaValidationError("Media container probe timed out.", "TimeoutError", 504)
+
     if res.returncode != 0:
-        raise MediaValidationError("File is corrupted.", "CorruptedMedia", 422)
+        raise MediaValidationError("File is corrupted.", "UnsupportedMediaContainer", 422)
 
     try:
         data = json.loads(res.stdout or "{}")
     except json.JSONDecodeError:
-        raise MediaValidationError("File is corrupted.", "CorruptedMedia", 422)
+        raise MediaValidationError("File is corrupted.", "UnsupportedMediaContainer", 422)
 
     format_info = data.get("format") or {}
     streams = data.get("streams") or []
     if not streams:
-        raise MediaValidationError("File is corrupted.", "CorruptedMedia", 422)
+        raise MediaValidationError("File is corrupted.", "UnsupportedMediaContainer", 422)
 
     audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
     video_streams = [s for s in streams if s.get("codec_type") == "video"]
 
     if not audio_streams:
-        raise MediaValidationError("Audio stream was not found.", "ValidationError", 422)
+        raise MediaValidationError("Audio stream was not found.", "InvalidAudioStream", 422)
 
     primary_audio = audio_streams[0]
     try:
@@ -121,7 +136,7 @@ def probe_media_file(file_path: str) -> MediaMetadata:
     except (ValueError, TypeError):
         duration = 0.0
 
-    if duration < MIN_DURATION_SECONDS:
+    if duration > 0 and duration < MIN_DURATION_SECONDS:
         raise MediaValidationError("Recording is too short.", "ValidationError", 422)
 
     try:
@@ -135,7 +150,7 @@ def probe_media_file(file_path: str) -> MediaMetadata:
         channels = 1
 
     return MediaMetadata(
-        duration_seconds=round(duration, 2),
+        duration_seconds=round(max(duration, 1.0), 2),
         format_name=str(format_info.get("format_name") or "unknown"),
         codec=str(primary_audio.get("codec_name") or "unknown"),
         sample_rate=sample_rate,
@@ -151,6 +166,12 @@ def extract_wav_16k_mono(input_path: str, output_wav_path: str, apply_loudnorm: 
     af_filter = "loudnorm=I=-16:TP=-1.5:LRA=11" if apply_loudnorm else "aformat=channel_layouts=mono"
     cmd = [
         "ffmpeg", "-y",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-err_detect", "ignore_err",
+        "-fflags", "+genpts+igndts+discardcorrupt",
+        "-analyzeduration", "100M",
+        "-probesize", "100M",
         "-i", input_path,
         "-vn",
         "-ar", "16000",
@@ -159,9 +180,15 @@ def extract_wav_16k_mono(input_path: str, output_wav_path: str, apply_loudnorm: 
         "-c:a", "pcm_s16le",
         output_wav_path,
     ]
-    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300)
+    except FileNotFoundError:
+        raise MediaValidationError("FFmpeg binary is unavailable on the server.", "FFmpegUnavailable", 503)
+    except subprocess.TimeoutExpired:
+        raise MediaValidationError("Audio normalization timed out.", "TimeoutError", 504)
+
     if res.returncode != 0 or not os.path.exists(output_wav_path) or os.path.getsize(output_wav_path) == 0:
-        raise MediaValidationError("File is corrupted.", "CorruptedMedia", 422)
+        raise MediaValidationError("Audio decoding failed: unsupported or corrupted container.", "UnsupportedMediaContainer", 422)
 
 
 def measure_audio_volume(wav_path: str) -> Tuple[float, float, bool]:

@@ -1,10 +1,23 @@
 import { useEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "framer-motion";
-import { Send, Sparkles, X, Loader2, Quote, Trash2, Copy, Check, Bot, User } from "lucide-react";
+import {
+  Send,
+  Sparkles,
+  X,
+  Loader2,
+  Quote,
+  Trash2,
+  Copy,
+  Check,
+  Bot,
+  User,
+  FileAudio,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useUIStore } from "@/stores/ui-store";
-import { api, GroundedAnswer } from "@/lib/api-client";
+import { api, GroundedAnswer, Lecture, Meeting } from "@/lib/api-client";
 import { useTranslation } from "@/lib/i18n";
 import { toast } from "sonner";
 
@@ -318,6 +331,7 @@ export function FloatingAIAssistant() {
       ];
 
   const [input, setInput] = useState("");
+  const [selectedResourceId, setSelectedResourceId] = useState<string>("");
   const [messages, setMessages] = useState<ChatMessage[]>([defaultGreeting]);
   const [suggestions, setSuggestions] = useState<string[]>(defaultSuggestions);
   const [isLoading, setIsLoading] = useState(false);
@@ -325,6 +339,26 @@ export function FloatingAIAssistant() {
   const [laserEvent, setLaserEvent] = useState<LaserEvent | null>(null);
   const [geniePhase, setGeniePhase] = useState<"idle" | "opening" | "closing">("idle");
   const [fabCoords, setFabCoords] = useState<{ x: number; y: number } | null>(null);
+
+  const { data: meetings = [] } = useQuery<Meeting[]>({
+    queryKey: ["meetings"],
+    queryFn: () => api.getMeetings(),
+    enabled: open,
+  });
+
+  const { data: lectures = [] } = useQuery<Lecture[]>({
+    queryKey: ["lectures"],
+    queryFn: () => api.getLectures(),
+    enabled: open,
+  });
+
+  useEffect(() => {
+    if (!open || typeof window === "undefined") return;
+    const urlId = new URLSearchParams(window.location.search).get("id");
+    if (urlId) {
+      setSelectedResourceId(urlId);
+    }
+  }, [open]);
 
   const prevOpenRef = useRef<boolean>(open);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
@@ -511,7 +545,11 @@ export function FloatingAIAssistant() {
         text: m.text,
       }));
 
-      const res: GroundedAnswer = await api.askQuestion(q, undefined, historyPayload);
+      const res: GroundedAnswer = await api.askQuestion(
+        q,
+        selectedResourceId || undefined,
+        historyPayload,
+      );
       setMessages((prev) => [
         ...prev,
         {
@@ -947,13 +985,13 @@ export function FloatingAIAssistant() {
                   <div className="truncate text-sm font-bold flex items-center gap-1.5">
                     <span>{isArabic ? "مساعد MeetMind الذكي الفائق" : "MeetMind Super AI"}</span>
                     <span className="rounded-full bg-primary/20 px-1.5 py-0.2 text-[9px] font-mono text-primary font-semibold">
-                      Gemini 3.8
+                      MeetMind AI
                     </span>
                   </div>
                   <div className="truncate text-[11px] text-muted-foreground">
                     {isArabic
-                      ? "يجيب على جميع أسئلتك ويحلل محاضراتك وملفاتك الصوتية"
-                      : "Answers any question & analyzes all audio transcripts"}
+                      ? "يجيب على أي سؤال في أي مجال ويحلل تسجيلاتك ومحاضراتك"
+                      : "Answers any question on any topic & analyzes your recordings"}
                   </div>
                 </div>
               </div>
@@ -976,6 +1014,38 @@ export function FloatingAIAssistant() {
                   <X className="h-4 w-4" />
                 </button>
               </div>
+            </div>
+
+            {/* Recording Scope Selector */}
+            <div className="flex items-center gap-2 border-b border-border/50 bg-background/60 px-3 py-1.5 text-[11px]">
+              <FileAudio className="h-3.5 w-3.5 shrink-0 text-primary" />
+              <span className="shrink-0 text-muted-foreground">
+                {isArabic ? "النطاق:" : "Scope:"}
+              </span>
+              <select
+                aria-label={isArabic ? "اختر التسجيل" : "Select recording scope"}
+                value={selectedResourceId}
+                onChange={(e) => setSelectedResourceId(e.target.value)}
+                className="min-w-0 flex-1 truncate rounded-md border border-border/60 bg-secondary/50 px-2 py-1 text-[11px] text-foreground focus:border-primary focus:outline-none"
+              >
+                <option value="">
+                  {isArabic
+                    ? "مساعد ذكي شامل (أي سؤال + جميع التسجيلات)"
+                    : "General AI + All Recordings (Ask anything)"}
+                </option>
+                {meetings.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {isArabic ? "اجتماع: " : "Meeting: "}
+                    {m.title}
+                  </option>
+                ))}
+                {lectures.map((l) => (
+                  <option key={l.id} value={l.id}>
+                    {isArabic ? "محاضرة: " : "Lecture: "}
+                    {l.title}
+                  </option>
+                ))}
+              </select>
             </div>
 
             {/* Chat Body */}

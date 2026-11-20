@@ -252,6 +252,27 @@ namespace MeetMind.Api.Services
             var existingSegments = db.TranscriptSegments.Where(s => isMeeting ? s.MeetingId == job.ResourceId : s.LectureId == job.ResourceId);
             db.TranscriptSegments.RemoveRange(existingSegments);
 
+            var existingTopics = db.Topics.Where(t => isMeeting ? t.MeetingId == job.ResourceId : t.LectureId == job.ResourceId);
+            db.Topics.RemoveRange(existingTopics);
+
+            var existingKeywords = db.Keywords.Where(k => isMeeting ? k.MeetingId == job.ResourceId : k.LectureId == job.ResourceId);
+            db.Keywords.RemoveRange(existingKeywords);
+
+            var existingHighlights = db.Highlights.Where(h => isMeeting ? h.MeetingId == job.ResourceId : h.LectureId == job.ResourceId);
+            db.Highlights.RemoveRange(existingHighlights);
+
+            var existingTasks = db.ActionItems.Where(a => isMeeting ? a.MeetingId == job.ResourceId : a.LectureId == job.ResourceId);
+            db.ActionItems.RemoveRange(existingTasks);
+
+            var existingQuizzes = db.Quizzes.Where(q => isMeeting ? q.MeetingId == job.ResourceId : q.LectureId == job.ResourceId);
+            db.Quizzes.RemoveRange(existingQuizzes);
+
+            var existingFlashcards = db.Flashcards.Where(f => isMeeting ? f.MeetingId == job.ResourceId : f.LectureId == job.ResourceId);
+            db.Flashcards.RemoveRange(existingFlashcards);
+
+            var existingMindMaps = db.MindMaps.Where(mm => isMeeting ? mm.MeetingId == job.ResourceId : mm.LectureId == job.ResourceId);
+            db.MindMaps.RemoveRange(existingMindMaps);
+
             foreach (var seg in transcription.Segments)
             {
                 db.TranscriptSegments.Add(new TranscriptSegment
@@ -375,7 +396,8 @@ namespace MeetMind.Api.Services
                         CorrectAnswerText = qq.CorrectAnswerText,
                         Explanation = qq.Explanation,
                         Difficulty = qq.Difficulty,
-                        SourceTimestamp = qq.TimestampRef
+                        SourceTimestamp = qq.TimestampRef,
+                        SourceReference = string.IsNullOrWhiteSpace(qq.TimestampRef) ? title : $"{title} [{qq.TimestampRef}]"
                     });
                 }
                 db.Quizzes.Add(quiz);
@@ -392,6 +414,8 @@ namespace MeetMind.Api.Services
                     Front = fc.Front,
                     Back = fc.Back,
                     TimestampRef = fc.TimestampRef,
+                    Topic = courseCode ?? title,
+                    Difficulty = "medium",
                     CreatedAtUtc = now
                 });
             }

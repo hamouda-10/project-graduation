@@ -20,10 +20,21 @@ builder.Services.AddControllers()
         options.JsonSerializerOptions.ReferenceHandler = System.Text.Json.Serialization.ReferenceHandler.IgnoreCycles;
     });
 
+var maxUploadMb = builder.Configuration.GetValue<long?>("Storage:MaxRecordingSizeMb") ?? 500;
+var maxUploadBytes = maxUploadMb * 1024L * 1024L;
+
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.Limits.MaxRequestBodySize = maxUploadBytes;
+    options.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(10);
+    options.Limits.RequestHeadersTimeout = TimeSpan.FromMinutes(5);
+});
+
 builder.Services.Configure<FormOptions>(options =>
 {
-    var maxMb = builder.Configuration.GetValue<long?>("Storage:MaxRecordingSizeMb") ?? 500;
-    options.MultipartBodyLengthLimit = maxMb * 1024L * 1024L;
+    options.MultipartBodyLengthLimit = maxUploadBytes;
+    options.ValueLengthLimit = int.MaxValue;
+    options.MultipartHeadersLengthLimit = int.MaxValue;
 });
 
 builder.Services.AddEndpointsApiExplorer();
@@ -73,12 +84,18 @@ builder.Services.AddHttpClient<IAiServiceClient, AiServiceClient>(client =>
 builder.Services.AddSingleton<IBackgroundProcessingQueue, BackgroundProcessingQueue>();
 builder.Services.AddHostedService<RecordingProcessingWorker>();
 
-// CORS
+// CORS (supports configurable production frontend origins via Cors:AllowedOrigins or CORS_ALLOWED_ORIGINS)
+var configuredOrigins = (
+    builder.Configuration["Cors:AllowedOrigins"]
+    ?? Environment.GetEnvironmentVariable("CORS_ALLOWED_ORIGINS")
+    ?? "http://localhost:3000,https://localhost:3000,https://project-graduation.ai.studio"
+).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowFrontend", policy =>
     {
-        policy.WithOrigins("http://localhost:3000", "https://localhost:3000")
+        policy.WithOrigins(configuredOrigins)
               .AllowAnyHeader()
               .AllowAnyMethod()
               .AllowCredentials();

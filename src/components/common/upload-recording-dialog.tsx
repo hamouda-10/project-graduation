@@ -231,7 +231,23 @@ export function UploadRecordingDialog({
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       recordedChunksRef.current = [];
-      const mr = new MediaRecorder(stream);
+
+      const candidateMimeTypes = [
+        "audio/webm;codecs=opus",
+        "audio/webm",
+        "audio/mp4;codecs=mp4a.40.2",
+        "audio/mp4",
+        "audio/ogg;codecs=opus",
+        "audio/ogg",
+      ];
+      const chosenMime =
+        typeof MediaRecorder !== "undefined" && typeof MediaRecorder.isTypeSupported === "function"
+          ? candidateMimeTypes.find((t) => MediaRecorder.isTypeSupported(t))
+          : undefined;
+
+      const mr = chosenMime
+        ? new MediaRecorder(stream, { mimeType: chosenMime })
+        : new MediaRecorder(stream);
       mediaRecorderRef.current = mr;
 
       // Connect real Web Audio API AnalyserNode
@@ -277,7 +293,7 @@ export function UploadRecordingDialog({
       }
 
       mr.ondataavailable = (e) => {
-        if (e.data.size > 0) recordedChunksRef.current.push(e.data);
+        if (e.data && e.data.size > 0) recordedChunksRef.current.push(e.data);
       };
 
       mr.onstop = () => {
@@ -288,12 +304,34 @@ export function UploadRecordingDialog({
           audioCtxRef.current.close().catch(() => {});
           audioCtxRef.current = null;
         }
-        const audioBlob = new Blob(recordedChunksRef.current, { type: "audio/webm" });
-        const recordedFile = new File([audioBlob], `mic_recording_${Date.now()}.webm`, {
-          type: "audio/webm",
+        stream.getTracks().forEach((track) => track.stop());
+
+        const actualMime = (
+          mr.mimeType ||
+          chosenMime ||
+          recordedChunksRef.current[0]?.type ||
+          "audio/webm"
+        )
+          .split(";")[0]
+          .trim();
+        const audioBlob = new Blob(recordedChunksRef.current, { type: actualMime });
+        if (audioBlob.size <= 0) {
+          toast.error(
+            isArabic
+              ? "التسجيل الصوتي فارغ، يرجى المحاولة مرة أخرى."
+              : "Recorded audio is empty. Please try recording again.",
+          );
+          return;
+        }
+        const ext = actualMime.includes("mp4")
+          ? ".m4a"
+          : actualMime.includes("ogg")
+            ? ".ogg"
+            : ".webm";
+        const recordedFile = new File([audioBlob], `mic_recording_${Date.now()}${ext}`, {
+          type: actualMime,
         });
         setFile(recordedFile);
-        stream.getTracks().forEach((track) => track.stop());
       };
 
       mr.start(500);
@@ -543,6 +581,11 @@ export function UploadRecordingDialog({
         title,
         courseCode,
         language: selectedLanguage,
+        onUploadProgress: (pct) => {
+          const scaled = Math.max(8, Math.min(18, Math.round(8 + (pct / 100) * 10)));
+          setProgressPercent(scaled);
+          useUIStore.getState().setAudioSystemState("Uploading", scaled);
+        },
       });
       setActiveJobId(res.jobId);
       useUIStore.getState().setAudioSystemState("Processing", 15);

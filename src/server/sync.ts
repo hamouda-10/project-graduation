@@ -1,6 +1,11 @@
 export type SyncEvent = {
   type: string;
   id?: string;
+  jobId?: string;
+  resourceId?: string;
+  resourceType?: string;
+  stage?: string;
+  error?: string;
   count?: number;
   progress?: number;
   data?: unknown;

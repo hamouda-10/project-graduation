@@ -25,6 +25,7 @@ namespace MeetMind.Infrastructure.Data
         public DbSet<QuizAttempt> QuizAttempts => Set<QuizAttempt>();
         public DbSet<Flashcard> Flashcards => Set<Flashcard>();
         public DbSet<MindMap> MindMaps => Set<MindMap>();
+        public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
         public DbSet<ProcessingJob> ProcessingJobs => Set<ProcessingJob>();
         public DbSet<Notification> Notifications => Set<Notification>();
         public DbSet<CalendarEvent> CalendarEvents => Set<CalendarEvent>();
@@ -50,6 +51,9 @@ namespace MeetMind.Infrastructure.Data
 
             modelBuilder.Entity<ProcessingJob>()
                 .HasIndex(j => new { j.UserId, j.Status });
+
+            modelBuilder.Entity<ChatMessage>()
+                .HasIndex(c => new { c.UserId, c.CreatedAtUtc });
 
             modelBuilder.Entity<ProcessingJob>()
                 .HasIndex(j => j.IdempotencyKey)

@@ -22,9 +22,47 @@ import {
   generateAiMindMap,
   askMeetMindAI,
 } from "./ai";
-import { cancelJob, createJob, processRecordingJob, retryJob, validateMediaFile } from "./jobs";
+import {
+  cancelJob,
+  checkMediaToolsAvailable,
+  createJob,
+  processRecordingJob,
+  retryJob,
+  validateMediaFile,
+} from "./jobs";
+import { isGeminiConfigured } from "./gemini";
+import {
+  deleteStoredAvatarFile,
+  getAvatarsDir,
+  getChunkUploadsDir,
+  getRecordingsDir,
+  isStorageWritable,
+  resolveSafeAvatarPath,
+  resolveSafeRecordingPath,
+  validateProfileImageBuffer,
+  verifySavedFileIntegrity,
+} from "./storage";
+import { buildUserDataExport, buildUserProfileOverview } from "./profile";
 import { subscribeSync, notifySync, getLatestSyncEvent } from "./sync";
 import { matchesArabicQuery } from "../lib/arabic";
+import {
+  appendAuthCookies,
+  appendClearAuthCookies,
+  authenticateRequest,
+  createSessionTokens,
+  getConfiguredGoogleClientId,
+  hashPasswordSecure,
+  hashToken,
+  normalizeEmail,
+  parseCookies,
+  revokeSessionAndToken,
+  sanitizePublicUser,
+  validateEmailAddress,
+  validatePasswordStrength,
+  verifyAccessJwt,
+  verifyGoogleIdentity,
+  verifyPasswordSecure,
+} from "./auth";
 
 const escapeHtml = (unsafe: string) =>
   (unsafe || "")
@@ -34,10 +72,187 @@ const escapeHtml = (unsafe: string) =>
     .replace(/"/g, "&quot;");
 
 function isUserAdmin(user: UserRecord | null): boolean {
-  return !user || user.role === "admin";
+  return Boolean(user && !user.isGuest && user.role === "admin");
 }
 
-const RECORDINGS_DIR = path.resolve(process.cwd(), "data", "recordings");
+const RECORDINGS_DIR = getRecordingsDir();
+const CHUNK_UPLOADS_DIR = getChunkUploadsDir();
+
+interface ChunkUploadSession {
+  uploadId: string;
+  userId: string;
+  sessionDir: string;
+  fileName: string;
+  resourceType: "meeting" | "lecture";
+  title: string;
+  courseCode: string;
+  language: string;
+  idempotencyKey: string;
+  expectedSize: number;
+  createdAt: number;
+}
+
+function getUploadMetaPath(uploadId: string): string {
+  const safeId = uploadId.replace(/[^a-zA-Z0-9_-]/g, "");
+  return path.join(CHUNK_UPLOADS_DIR, `${safeId}.meta.json`);
+}
+
+function saveUploadSession(session: ChunkUploadSession): void {
+  fs.mkdirSync(CHUNK_UPLOADS_DIR, { recursive: true });
+  fs.mkdirSync(session.sessionDir, { recursive: true });
+  fs.writeFileSync(getUploadMetaPath(session.uploadId), JSON.stringify(session), "utf-8");
+}
+
+function loadUploadSession(uploadId: string): ChunkUploadSession | null {
+  const safeId = uploadId.replace(/[^a-zA-Z0-9_-]/g, "");
+  if (!safeId) return null;
+  const metaPath = getUploadMetaPath(safeId);
+  if (!fs.existsSync(metaPath)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(metaPath, "utf-8")) as ChunkUploadSession;
+  } catch {
+    return null;
+  }
+}
+
+function cleanupUploadSession(session: ChunkUploadSession): void {
+  try {
+    const metaPath = getUploadMetaPath(session.uploadId);
+    if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
+    if (fs.existsSync(session.sessionDir)) {
+      fs.rmSync(session.sessionDir, { recursive: true, force: true });
+    }
+  } catch {
+    // ignore cleanup errors
+  }
+}
+
+async function finalizeUploadedRecording(params: {
+  savedPath: string;
+  originalFilename: string;
+  resourceType: "meeting" | "lecture";
+  title: string;
+  courseCode: string;
+  language: string;
+  idempotencyKey: string;
+  user: UserRecord | null;
+}): Promise<Response> {
+  const {
+    savedPath,
+    originalFilename,
+    resourceType,
+    title,
+    courseCode,
+    language,
+    idempotencyKey,
+    user,
+  } = params;
+
+  const probe = await validateMediaFile(savedPath, originalFilename);
+  if (!probe.valid) {
+    try {
+      if (fs.existsSync(savedPath)) fs.unlinkSync(savedPath);
+    } catch {
+      /* ignore */
+    }
+    return Response.json(
+      {
+        error: probe.error || "Invalid media file.",
+        category: probe.category || "MediaValidationError",
+        correlationId: probe.correlationId,
+      },
+      { status: 422 },
+    );
+  }
+
+  let effectivePath = savedPath;
+  if (probe.repairedPath && fs.existsSync(probe.repairedPath)) {
+    effectivePath = probe.repairedPath;
+    try {
+      if (fs.existsSync(savedPath)) fs.unlinkSync(savedPath);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const resourceId = resourceType === "meeting" ? `m_${Date.now()}` : `l_${Date.now()}`;
+  const now = new Date().toISOString();
+
+  if (resourceType === "meeting") {
+    db.update("meetings", (meetings) => [
+      {
+        id: resourceId,
+        workspaceId: "ws_default",
+        title,
+        hostName: user?.name || "Organizer",
+        hostId: user?.id || "usr_admin",
+        date: now.split("T")[0],
+        durationSeconds: probe.durationSeconds,
+        participantsCount: 1,
+        status: "Processing",
+        language,
+        recordingPath: effectivePath,
+        recordingFileName: originalFilename,
+        audioUrl: `/api/v1/recordings/audio/${resourceId}`,
+        segments: [],
+        createdAt: now,
+        updatedAt: now,
+      },
+      ...meetings,
+    ]);
+  } else {
+    db.update("lectures", (lectures) => [
+      {
+        id: resourceId,
+        workspaceId: "ws_default",
+        title,
+        courseCode: courseCode || "GEN 101",
+        instructorName: user?.name || "Lecturer",
+        instructorId: user?.id || "usr_admin",
+        date: now.split("T")[0],
+        durationSeconds: probe.durationSeconds,
+        status: "Processing",
+        language,
+        recordingPath: effectivePath,
+        recordingFileName: originalFilename,
+        audioUrl: `/api/v1/recordings/audio/${resourceId}`,
+        segments: [],
+        createdAt: now,
+        updatedAt: now,
+      },
+      ...lectures,
+    ]);
+  }
+
+  const job = createJob(resourceType, resourceId, originalFilename, effectivePath, language, {
+    userId: user?.id || "usr_admin",
+    idempotencyKey: idempotencyKey || undefined,
+  });
+
+  setTimeout(() => {
+    void processRecordingJob(
+      job.id,
+      resourceType,
+      resourceId,
+      effectivePath,
+      originalFilename,
+      language,
+    );
+  }, 50);
+
+  return Response.json(
+    {
+      message: "Recording accepted for transcription and analysis",
+      jobId: job.id,
+      resourceId,
+      resourceType,
+      durationSeconds: probe.durationSeconds,
+      repaired: Boolean(probe.repairedPath),
+      status: "Queued",
+    },
+    { status: 202 },
+  );
+}
 
 function getMimeTypeFromExt(ext: string): string {
   switch (ext) {
@@ -112,30 +327,21 @@ function findRecordingFile(
   return null;
 }
 
-function hashPassword(password: string): string {
-  return crypto.createHash("sha256").update(`salt_meetmind_${password}`).digest("hex");
+function getAuthUser(req: Request): UserRecord | null {
+  const result = authenticateRequest(req);
+  return result.ok ? result.user : null;
 }
 
-function getAuthUser(req: Request): UserRecord | null {
-  const authHeader = req.headers.get("Authorization");
-  const cookie = req.headers.get("Cookie") || "";
-  let token = "";
-
-  if (authHeader && authHeader.startsWith("Bearer ")) {
-    token = authHeader.substring(7);
-  } else {
-    const match = cookie.match(/meetmind_token=([^;]+)/);
-    if (match) token = match[1];
+function getScopedResourceIds(user: UserRecord): Set<string> {
+  if (isUserAdmin(user)) {
+    return new Set([
+      ...db.get("meetings").map((m) => m.id),
+      ...db.get("lectures").map((l) => l.id),
+    ]);
   }
-
-  const users = db.get("users");
-  if (!token) {
-    // Default to admin for seamless evaluation if no token provided yet
-    return users.find((u) => u.id === "usr_admin") || users[0] || null;
-  }
-
-  // Token is user ID or hash
-  return users.find((u) => u.id === token || u.email === token) || users[0] || null;
+  const meetings = db.get("meetings").filter((m) => m.hostId === user.id);
+  const lectures = db.get("lectures").filter((l) => l.instructorId === user.id);
+  return new Set([...meetings.map((m) => m.id), ...lectures.map((l) => l.id)]);
 }
 
 export async function handleApiRequest(req: Request): Promise<Response | null> {
@@ -150,7 +356,760 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
 
   try {
     // ----------------------------------------------------
-    // REAL-TIME SYNCHRONIZATION (SSE & POLLING STATUS)
+    // PUBLIC HEALTH & AUTH CONFIGURATION
+    // ----------------------------------------------------
+    if (pathname === "/api/v1/health" && method === "GET") {
+      const mediaTools = await checkMediaToolsAvailable();
+      return Response.json({
+        status: "healthy",
+        service: "meetmind-api",
+        timestamp: new Date().toISOString(),
+        aiConfigured: isGeminiConfigured(),
+        ffmpegAvailable: mediaTools.ffmpeg && mediaTools.ffprobe,
+        storageWritable: isStorageWritable(),
+      });
+    }
+
+    if (pathname === "/api/v1/auth/config" && method === "GET") {
+      const googleClientId = getConfiguredGoogleClientId();
+      return Response.json({
+        googleEnabled: Boolean(googleClientId),
+        googleClientId: googleClientId || null,
+      });
+    }
+
+    // ----------------------------------------------------
+    // PUBLIC AUTHENTICATION ENDPOINTS
+    // ----------------------------------------------------
+    if (pathname === "/api/v1/auth/login" && method === "POST") {
+      const body = await req.json().catch(() => ({}));
+      const email = normalizeEmail(body.email);
+      const password = typeof body.password === "string" ? body.password : "";
+      const rememberMe = Boolean(body.rememberMe);
+
+      if (!email || !password) {
+        return Response.json({ error: "Email and password are required." }, { status: 400 });
+      }
+      if (!validateEmailAddress(email)) {
+        return Response.json({ error: "Invalid email address." }, { status: 400 });
+      }
+
+      const users = db.get("users") || [];
+      const user = users.find((u) => normalizeEmail(u.email) === email && !u.isGuest);
+
+      if (!user) {
+        return Response.json({ error: "Incorrect email or password." }, { status: 401 });
+      }
+
+      if (user.authProvider === "google" && !user.passwordHash) {
+        return Response.json(
+          {
+            error:
+              "This account uses Google Sign-In. Please click 'Continue with Google' to sign in.",
+          },
+          { status: 401 },
+        );
+      }
+
+      if (!verifyPasswordSecure(password, user.passwordHash)) {
+        return Response.json({ error: "Incorrect email or password." }, { status: 401 });
+      }
+
+      const tokens = createSessionTokens(user, { rememberMe, isGuest: false, req });
+      const headers = new Headers({
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      });
+      appendAuthCookies(headers, req, tokens);
+
+      return new Response(
+        JSON.stringify({
+          token: tokens.accessToken,
+          expiresAt: tokens.expiresAt,
+          rememberMe: tokens.rememberMe,
+          user: sanitizePublicUser(user),
+        }),
+        { status: 200, headers },
+      );
+    }
+
+    if (pathname === "/api/v1/auth/register" && method === "POST") {
+      const body = await req.json().catch(() => ({}));
+      const name = String(body.name || body.fullName || "")
+        .replace(/[<>]/g, "")
+        .trim();
+      const email = normalizeEmail(body.email);
+      const password = typeof body.password === "string" ? body.password : "";
+      const confirmPassword =
+        typeof body.confirmPassword === "string" ? body.confirmPassword : undefined;
+      const department = String(body.department || "")
+        .replace(/[<>]/g, "")
+        .trim();
+
+      if (!name || name.length < 2 || name.length > 100) {
+        return Response.json(
+          { error: "Full name must be between 2 and 100 characters." },
+          { status: 400 },
+        );
+      }
+      if (!email || !validateEmailAddress(email)) {
+        return Response.json({ error: "Invalid email address." }, { status: 400 });
+      }
+
+      const strength = validatePasswordStrength(password);
+      if (!strength.valid) {
+        return Response.json({ error: strength.error }, { status: 400 });
+      }
+      if (confirmPassword !== undefined && password !== confirmPassword) {
+        return Response.json({ error: "Passwords do not match." }, { status: 400 });
+      }
+
+      const users = db.get("users") || [];
+      if (users.some((u) => normalizeEmail(u.email) === email && !u.isGuest)) {
+        return Response.json({ error: "Email already registered." }, { status: 409 });
+      }
+
+      const nowIso = new Date().toISOString();
+      const newUser: UserRecord = {
+        id: `usr_${Date.now().toString(36)}_${crypto.randomBytes(6).toString("hex")}`,
+        email,
+        name,
+        passwordHash: hashPasswordSecure(password),
+        role: "member",
+        authProvider: "local",
+        emailVerified: false,
+        isGuest: false,
+        department,
+        nameCustomized: true,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+
+      db.update("users", (all) => [...all, newUser]);
+
+      const tokens = createSessionTokens(newUser, { rememberMe: true, isGuest: false, req });
+      const headers = new Headers({
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      });
+      appendAuthCookies(headers, req, tokens);
+
+      return new Response(
+        JSON.stringify({
+          token: tokens.accessToken,
+          expiresAt: tokens.expiresAt,
+          user: sanitizePublicUser(newUser),
+        }),
+        { status: 201, headers },
+      );
+    }
+
+    if (pathname === "/api/v1/auth/google" && method === "POST") {
+      const body = await req.json().catch(() => ({}));
+      const idToken = typeof body.idToken === "string" ? body.idToken : undefined;
+      const accessToken = typeof body.accessToken === "string" ? body.accessToken : undefined;
+
+      const verified = await verifyGoogleIdentity({ idToken, accessToken });
+      if (!verified.ok) {
+        return Response.json({ error: verified.error }, { status: verified.status });
+      }
+
+      const { sub, email, name, picture } = verified.identity;
+      const users = db.get("users") || [];
+      let user = users.find(
+        (u) => !u.isGuest && (u.googleSub === sub || normalizeEmail(u.email) === email),
+      );
+
+      if (user) {
+        // Link Google identity to existing verified-email account without duplicating
+        // NEVER overwrite a user's manually edited name or custom/removed profile photo
+        const updatedUser: UserRecord = {
+          ...user,
+          googleSub: sub,
+          emailVerified: true,
+          name: user.nameCustomized ? user.name : user.name || name,
+          avatarUrl: user.avatarCustomized ? user.avatarUrl : user.avatarUrl || picture,
+          updatedAt: new Date().toISOString(),
+        };
+        db.update("users", (all) => all.map((u) => (u.id === updatedUser.id ? updatedUser : u)));
+        user = updatedUser;
+      } else {
+        const nowIso = new Date().toISOString();
+        user = {
+          id: `usr_${Date.now().toString(36)}_${crypto.randomBytes(6).toString("hex")}`,
+          email,
+          name,
+          passwordHash: "",
+          role: "member",
+          authProvider: "google",
+          googleSub: sub,
+          emailVerified: true,
+          isGuest: false,
+          avatarUrl: picture,
+          nameCustomized: false,
+          avatarCustomized: false,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        };
+        db.update("users", (all) => [...all, user!]);
+      }
+
+      const tokens = createSessionTokens(user, { rememberMe: true, isGuest: false, req });
+      const headers = new Headers({
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      });
+      appendAuthCookies(headers, req, tokens);
+
+      return new Response(
+        JSON.stringify({
+          token: tokens.accessToken,
+          expiresAt: tokens.expiresAt,
+          user: sanitizePublicUser(user),
+        }),
+        { status: 200, headers },
+      );
+    }
+
+    if (pathname === "/api/v1/auth/guest" && method === "POST") {
+      const guestCode = crypto.randomBytes(6).toString("hex");
+      const guestUser: UserRecord = {
+        id: `guest_${Date.now().toString(36)}_${guestCode}`,
+        email: `guest+${guestCode}@session.meetmind.ai`,
+        name: "Guest Explorer",
+        passwordHash: "",
+        role: "guest",
+        authProvider: "guest",
+        emailVerified: false,
+        isGuest: true,
+        department: "Guest Session",
+        createdAt: new Date().toISOString(),
+      };
+
+      const tokens = createSessionTokens(guestUser, { rememberMe: false, isGuest: true, req });
+      const headers = new Headers({
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      });
+      appendAuthCookies(headers, req, tokens);
+
+      return new Response(
+        JSON.stringify({
+          token: tokens.accessToken,
+          expiresAt: tokens.expiresAt,
+          user: sanitizePublicUser(guestUser),
+        }),
+        { status: 200, headers },
+      );
+    }
+
+    if (pathname === "/api/v1/auth/refresh" && method === "POST") {
+      const cookies = parseCookies(req);
+      const body = await req.json().catch(() => ({}));
+      const rawRefresh = (
+        cookies.meetmind_refresh_token ||
+        (typeof body.refreshToken === "string" ? body.refreshToken : "")
+      ).trim();
+
+      if (!rawRefresh) {
+        return Response.json(
+          { error: "Session expired. Please sign in again.", code: "TOKEN_EXPIRED" },
+          { status: 401 },
+        );
+      }
+
+      const refreshHash = hashToken(rawRefresh);
+      const sessions = db.get("authSessions") || [];
+      const session = sessions.find((s) => s.refreshTokenHash === refreshHash);
+      if (!session || session.revokedAt || new Date(session.expiresAt).getTime() <= Date.now()) {
+        const headers = new Headers({ "Content-Type": "application/json" });
+        appendClearAuthCookies(headers, req);
+        return new Response(
+          JSON.stringify({
+            error: "Session expired. Please sign in again.",
+            code: "TOKEN_EXPIRED",
+          }),
+          { status: 401, headers },
+        );
+      }
+
+      const users = db.get("users") || [];
+      let user = users.find((u) => u.id === session.userId);
+      if (!user && session.isGuest) {
+        user = {
+          id: session.userId,
+          email: `${session.userId}@session.meetmind.ai`,
+          name: "Guest Explorer",
+          passwordHash: "",
+          role: "guest",
+          authProvider: "guest",
+          isGuest: true,
+          department: "Guest Session",
+          createdAt: session.createdAt,
+        };
+      }
+
+      if (!user) {
+        revokeSessionAndToken({ sessionId: session.id });
+        return Response.json({ error: "Account does not exist." }, { status: 401 });
+      }
+
+      // Rotate refresh session securely
+      revokeSessionAndToken({ sessionId: session.id });
+      const newTokens = createSessionTokens(user, {
+        rememberMe: session.rememberMe,
+        isGuest: session.isGuest,
+        req,
+      });
+
+      const headers = new Headers({
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      });
+      appendAuthCookies(headers, req, newTokens);
+
+      return new Response(
+        JSON.stringify({
+          token: newTokens.accessToken,
+          expiresAt: newTokens.expiresAt,
+          rememberMe: newTokens.rememberMe,
+          user: sanitizePublicUser(user),
+        }),
+        { status: 200, headers },
+      );
+    }
+
+    if (pathname === "/api/v1/auth/logout" && method === "POST") {
+      const authHeader = req.headers.get("Authorization") || "";
+      const cookies = parseCookies(req);
+      const rawToken = authHeader.startsWith("Bearer ")
+        ? authHeader.slice(7).trim()
+        : (cookies.meetmind_token || "").trim();
+
+      if (rawToken) {
+        const verified = verifyAccessJwt(rawToken);
+        if (verified.valid) {
+          revokeSessionAndToken({
+            jti: verified.claims.jti,
+            exp: verified.claims.exp,
+            sessionId: verified.claims.sid,
+            refreshToken: cookies.meetmind_refresh_token,
+          });
+        } else if (cookies.meetmind_refresh_token) {
+          revokeSessionAndToken({ refreshToken: cookies.meetmind_refresh_token });
+        }
+      } else if (cookies.meetmind_refresh_token) {
+        revokeSessionAndToken({ refreshToken: cookies.meetmind_refresh_token });
+      }
+
+      const headers = new Headers({
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      });
+      appendClearAuthCookies(headers, req);
+      return new Response(JSON.stringify({ success: true }), { status: 200, headers });
+    }
+
+    // ----------------------------------------------------
+    // CENTRAL AUTHENTICATION GATE (ALL ROUTES BELOW REQUIRE VALID SESSION)
+    // ----------------------------------------------------
+    const auth = authenticateRequest(req);
+    if (!auth.ok) {
+      return Response.json(
+        { error: auth.error, code: auth.code },
+        { status: auth.status, headers: { "Cache-Control": "no-store" } },
+      );
+    }
+
+    const currentUser = auth.user;
+    const currentIsGuest = auth.isGuest;
+    const currentIsAdmin = isUserAdmin(currentUser);
+
+    if (pathname === "/api/v1/auth/me" && method === "GET") {
+      return Response.json(sanitizePublicUser(currentUser), {
+        headers: { "Cache-Control": "no-store" },
+      });
+    }
+
+    // ----------------------------------------------------
+    // USER PROFILE, AVATAR STORAGE, ANALYTICS, SESSIONS & EXPORT
+    // ----------------------------------------------------
+    if (pathname === "/api/v1/profile" && method === "GET") {
+      const overview = buildUserProfileOverview(currentUser, auth.claims.sid);
+      return Response.json(overview, {
+        headers: { "Cache-Control": "no-store" },
+      });
+    }
+
+    if (pathname === "/api/v1/profile" && (method === "PUT" || method === "PATCH")) {
+      if (currentIsGuest) {
+        return Response.json(
+          {
+            error:
+              "Guest sessions are temporary and cannot save permanent profile changes. Sign in or create an account.",
+          },
+          { status: 403 },
+        );
+      }
+
+      const body = await req.json().catch(() => ({}));
+      const cleanStr = (v: unknown, maxLen: number) => {
+        if (typeof v !== "string") return undefined;
+        let out = "";
+        for (let i = 0; i < v.length; i++) {
+          const ch = v[i];
+          const code = v.charCodeAt(i);
+          if (ch === "<" || ch === ">") continue;
+          if (code < 0x20 || code === 0x7f) {
+            out += " ";
+          } else {
+            out += ch;
+          }
+        }
+        return out.trim().slice(0, maxLen);
+      };
+
+      const nextName = cleanStr(body.name, 100);
+      if (nextName !== undefined && nextName.length < 2) {
+        return Response.json(
+          { error: "Full name must be at least 2 characters long." },
+          { status: 400 },
+        );
+      }
+
+      const nextBio = cleanStr(body.bio, 500);
+      const nextJobTitle = cleanStr(body.jobTitle, 100);
+      const nextDepartment = cleanStr(body.department, 100);
+      const nextOrganization = cleanStr(body.organization, 120);
+
+      let updatedUser: UserRecord | null = null;
+      const nowIso = new Date().toISOString();
+
+      db.update("users", (all) =>
+        all.map((u) => {
+          if (u.id !== currentUser.id) return u;
+          const nameChanged = nextName !== undefined && nextName !== u.name;
+          updatedUser = {
+            ...u,
+            name: nextName !== undefined ? nextName : u.name,
+            bio: nextBio !== undefined ? nextBio : u.bio,
+            jobTitle: nextJobTitle !== undefined ? nextJobTitle : u.jobTitle,
+            department: nextDepartment !== undefined ? nextDepartment : u.department,
+            organization: nextOrganization !== undefined ? nextOrganization : u.organization,
+            nameCustomized: nameChanged ? true : u.nameCustomized,
+            updatedAt: nowIso,
+          };
+          return updatedUser;
+        }),
+      );
+
+      if (!updatedUser) {
+        return Response.json({ error: "User profile not found." }, { status: 404 });
+      }
+
+      // Keep display attribution in sync on user's own meetings/lectures if name changed
+      if (nextName && nextName !== currentUser.name) {
+        db.update("meetings", (list) =>
+          list.map((m) => (m.hostId === currentUser.id ? { ...m, hostName: nextName } : m)),
+        );
+        db.update("lectures", (list) =>
+          list.map((l) =>
+            l.instructorId === currentUser.id ? { ...l, instructorName: nextName } : l,
+          ),
+        );
+      }
+
+      notifySync({ type: "profile_updated", id: currentUser.id });
+      const profile = buildUserProfileOverview(updatedUser, auth.claims.sid);
+      return Response.json(
+        { success: true, user: sanitizePublicUser(updatedUser), profile },
+        { headers: { "Cache-Control": "no-store" } },
+      );
+    }
+
+    if (pathname === "/api/v1/profile/avatar" && method === "POST") {
+      if (currentIsGuest) {
+        return Response.json(
+          {
+            error:
+              "Guest sessions cannot upload persistent profile images. Sign in or create an account.",
+          },
+          { status: 403 },
+        );
+      }
+
+      let formData: FormData;
+      try {
+        formData = await req.formData();
+      } catch {
+        return Response.json(
+          { error: "Invalid multipart upload payload. Please select a JPG, PNG, or WEBP image." },
+          { status: 400 },
+        );
+      }
+
+      const fileEntry = formData.get("avatar") || formData.get("file");
+      if (!fileEntry || typeof fileEntry === "string") {
+        return Response.json({ error: "No image file provided." }, { status: 400 });
+      }
+
+      const arrayBuf = await fileEntry.arrayBuffer();
+      const buffer = Buffer.from(arrayBuf);
+      const validation = validateProfileImageBuffer(buffer);
+      if (!validation.ok) {
+        return Response.json({ error: validation.error }, { status: 400 });
+      }
+
+      const safeUserSlug = currentUser.id.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 32);
+      const fileName = `av_${safeUserSlug}_${Date.now()}_${crypto.randomBytes(6).toString("hex")}${validation.ext}`;
+      const avatarsDir = getAvatarsDir();
+      fs.mkdirSync(avatarsDir, { recursive: true });
+      const targetPath = resolveSafeAvatarPath(fileName);
+      fs.writeFileSync(targetPath, buffer);
+
+      const previousFileName = currentUser.avatarFileName;
+      const avatarUrl = `/api/v1/profile/avatars/${encodeURIComponent(fileName)}`;
+      const nowIso = new Date().toISOString();
+      let updatedUser: UserRecord | null = null;
+
+      db.update("users", (all) =>
+        all.map((u) => {
+          if (u.id !== currentUser.id) return u;
+          updatedUser = {
+            ...u,
+            avatarFileName: fileName,
+            avatarUrl,
+            avatarCustomized: true,
+            updatedAt: nowIso,
+          };
+          return updatedUser;
+        }),
+      );
+
+      if (previousFileName && previousFileName !== fileName) {
+        deleteStoredAvatarFile(previousFileName);
+      }
+
+      if (!updatedUser) {
+        deleteStoredAvatarFile(fileName);
+        return Response.json({ error: "User profile not found." }, { status: 404 });
+      }
+
+      notifySync({ type: "profile_avatar_updated", id: currentUser.id });
+      return Response.json(
+        {
+          success: true,
+          user: sanitizePublicUser(updatedUser),
+          avatarUrl,
+          width: validation.width,
+          height: validation.height,
+          sizeBytes: validation.sizeBytes,
+          mimeType: validation.mimeType,
+        },
+        { headers: { "Cache-Control": "no-store" } },
+      );
+    }
+
+    if (pathname === "/api/v1/profile/avatar" && method === "DELETE") {
+      if (currentIsGuest) {
+        return Response.json(
+          { error: "Guest sessions do not have a saved profile image." },
+          { status: 403 },
+        );
+      }
+
+      const previousFileName = currentUser.avatarFileName;
+      let updatedUser: UserRecord | null = null;
+      const nowIso = new Date().toISOString();
+
+      db.update("users", (all) =>
+        all.map((u) => {
+          if (u.id !== currentUser.id) return u;
+          updatedUser = {
+            ...u,
+            avatarFileName: undefined,
+            avatarUrl: undefined,
+            avatarCustomized: true,
+            updatedAt: nowIso,
+          };
+          return updatedUser;
+        }),
+      );
+
+      if (previousFileName) {
+        deleteStoredAvatarFile(previousFileName);
+      }
+
+      if (!updatedUser) {
+        return Response.json({ error: "User profile not found." }, { status: 404 });
+      }
+
+      notifySync({ type: "profile_avatar_removed", id: currentUser.id });
+      return Response.json(
+        { success: true, user: sanitizePublicUser(updatedUser) },
+        { headers: { "Cache-Control": "no-store" } },
+      );
+    }
+
+    if (
+      pathname.startsWith("/api/v1/profile/avatars/") &&
+      (method === "GET" || method === "HEAD")
+    ) {
+      const requestedName = decodeURIComponent(
+        pathname.slice("/api/v1/profile/avatars/".length),
+      ).trim();
+      const safeName = path.basename(requestedName);
+      if (!safeName || safeName !== requestedName) {
+        return Response.json({ error: "Invalid avatar path." }, { status: 400 });
+      }
+
+      // Strict per-user authorization: a user can ONLY access their own uploaded avatar (unless admin)
+      if (!currentIsAdmin && currentUser.avatarFileName !== safeName) {
+        return Response.json(
+          { error: "You are not authorized to access this profile image." },
+          { status: 403 },
+        );
+      }
+
+      let filePath: string;
+      try {
+        filePath = resolveSafeAvatarPath(safeName);
+      } catch {
+        return Response.json({ error: "Invalid avatar path." }, { status: 400 });
+      }
+
+      if (!fs.existsSync(filePath)) {
+        return Response.json({ error: "Profile image not found." }, { status: 404 });
+      }
+
+      const ext = path.extname(safeName).toLowerCase();
+      const contentType =
+        ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg";
+      const bytes = fs.readFileSync(filePath);
+      return new Response(method === "HEAD" ? null : bytes, {
+        status: 200,
+        headers: {
+          "Content-Type": contentType,
+          "Content-Length": String(bytes.length),
+          "X-Content-Type-Options": "nosniff",
+          "Cache-Control": "private, max-age=3600",
+        },
+      });
+    }
+
+    if (pathname === "/api/v1/profile/password" && method === "POST") {
+      if (currentIsGuest) {
+        return Response.json(
+          { error: "Guest sessions cannot set or change account passwords." },
+          { status: 403 },
+        );
+      }
+
+      const body = await req.json().catch(() => ({}));
+      const currentPassword = typeof body.currentPassword === "string" ? body.currentPassword : "";
+      const newPassword = typeof body.newPassword === "string" ? body.newPassword : "";
+      const confirmPassword =
+        typeof body.confirmPassword === "string" ? body.confirmPassword : undefined;
+
+      const hasExistingPassword = Boolean(
+        currentUser.passwordHash && currentUser.passwordHash.startsWith("scrypt$"),
+      );
+      if (hasExistingPassword) {
+        if (!currentPassword) {
+          return Response.json({ error: "Current password is required." }, { status: 400 });
+        }
+        if (!verifyPasswordSecure(currentPassword, currentUser.passwordHash)) {
+          return Response.json({ error: "Current password is incorrect." }, { status: 401 });
+        }
+      }
+
+      const strength = validatePasswordStrength(newPassword);
+      if (!strength.valid) {
+        return Response.json({ error: strength.error }, { status: 400 });
+      }
+      if (confirmPassword !== undefined && newPassword !== confirmPassword) {
+        return Response.json({ error: "New passwords do not match." }, { status: 400 });
+      }
+      if (hasExistingPassword && currentPassword === newPassword) {
+        return Response.json(
+          { error: "New password must be different from your current password." },
+          { status: 400 },
+        );
+      }
+
+      const newHash = hashPasswordSecure(newPassword);
+      const nowIso = new Date().toISOString();
+      db.update("users", (all) =>
+        all.map((u) =>
+          u.id === currentUser.id ? { ...u, passwordHash: newHash, updatedAt: nowIso } : u,
+        ),
+      );
+
+      // Revoke all other sessions belonging to this user
+      db.update("authSessions", (all = []) =>
+        all.map((s) =>
+          s.userId === currentUser.id && s.id !== auth.claims.sid && !s.revokedAt
+            ? { ...s, revokedAt: nowIso }
+            : s,
+        ),
+      );
+
+      return Response.json(
+        {
+          success: true,
+          message: hasExistingPassword
+            ? "Password updated successfully. Other active sessions have been signed out."
+            : "Account password created successfully.",
+        },
+        { headers: { "Cache-Control": "no-store" } },
+      );
+    }
+
+    if (pathname === "/api/v1/profile/sessions/revoke-others" && method === "POST") {
+      const nowIso = new Date().toISOString();
+      let revokedCount = 0;
+      db.update("authSessions", (all = []) =>
+        all.map((s) => {
+          if (s.userId === currentUser.id && s.id !== auth.claims.sid && !s.revokedAt) {
+            revokedCount++;
+            return { ...s, revokedAt: nowIso };
+          }
+          return s;
+        }),
+      );
+      return Response.json({ success: true, revokedCount });
+    }
+
+    if (pathname.startsWith("/api/v1/profile/sessions/") && method === "DELETE") {
+      const sessionId = decodeURIComponent(
+        pathname.slice("/api/v1/profile/sessions/".length),
+      ).trim();
+      const target = (db.get("authSessions") || []).find((s) => s.id === sessionId);
+      if (!target || target.userId !== currentUser.id) {
+        return Response.json({ error: "Session not found." }, { status: 404 });
+      }
+      revokeSessionAndToken({ sessionId: target.id });
+      return Response.json({
+        success: true,
+        revokedCurrent: target.id === auth.claims.sid,
+      });
+    }
+
+    if (pathname === "/api/v1/profile/export" && method === "GET") {
+      const payload = buildUserDataExport(currentUser);
+      const safeStamp = new Date().toISOString().slice(0, 10);
+      return new Response(JSON.stringify(payload, null, 2), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Content-Disposition": `attachment; filename="meetmind_my_data_${safeStamp}.json"`,
+          "Cache-Control": "no-store",
+        },
+      });
+    }
+
+    // ----------------------------------------------------
+    // REAL-TIME SYNCHRONIZATION (AUTHENTICATED SSE & POLLING STATUS)
     // ----------------------------------------------------
     if (pathname === "/api/v1/sync/status" && method === "GET") {
       return Response.json(getLatestSyncEvent());
@@ -191,116 +1150,6 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
           "Content-Type": "text/event-stream",
           "Cache-Control": "no-cache, no-transform",
           Connection: "keep-alive",
-        },
-      });
-    }
-
-    // ----------------------------------------------------
-    // AUTHENTICATION
-    // ----------------------------------------------------
-    if (pathname === "/api/v1/auth/login" && method === "POST") {
-      const body = await req.json();
-      const { email, password } = body;
-      const users = db.get("users");
-      const user = users.find((u) => u.email.toLowerCase() === email?.toLowerCase());
-
-      if (!user) {
-        return Response.json({ error: "Invalid email or password" }, { status: 401 });
-      }
-
-      // Check password (accept demo password or hash)
-      const hashed = hashPassword(password);
-      if (user.passwordHash !== hashed && !user.passwordHash.startsWith("hash_")) {
-        return Response.json({ error: "Invalid email or password" }, { status: 401 });
-      }
-
-      const token = user.id;
-      return new Response(
-        JSON.stringify({
-          token,
-          user: {
-            id: user.id,
-            email: user.email,
-            name: user.name,
-            role: user.role,
-            department: user.department,
-          },
-        }),
-        {
-          status: 200,
-          headers: {
-            "Content-Type": "application/json",
-            "Set-Cookie": `meetmind_token=${token}; Path=/; HttpOnly; SameSite=Lax`,
-          },
-        },
-      );
-    }
-
-    if (pathname === "/api/v1/auth/register" && method === "POST") {
-      const body = await req.json();
-      const { email, name, password, role, department } = body;
-
-      if (!email || !name || !password) {
-        return Response.json({ error: "Name, email, and password are required" }, { status: 400 });
-      }
-
-      const users = db.get("users");
-      if (users.some((u) => u.email.toLowerCase() === email.toLowerCase())) {
-        return Response.json({ error: "Account with this email already exists" }, { status: 409 });
-      }
-
-      const newUser: UserRecord = {
-        id: `usr_${Date.now()}`,
-        email,
-        name,
-        passwordHash: hashPassword(password),
-        role: role || "member",
-        department: department || "General",
-        createdAt: new Date().toISOString(),
-      };
-
-      db.update("users", (all) => [...all, newUser]);
-
-      return new Response(
-        JSON.stringify({
-          token: newUser.id,
-          user: {
-            id: newUser.id,
-            email: newUser.email,
-            name: newUser.name,
-            role: newUser.role,
-            department: newUser.department,
-          },
-        }),
-        {
-          status: 201,
-          headers: {
-            "Content-Type": "application/json",
-            "Set-Cookie": `meetmind_token=${newUser.id}; Path=/; HttpOnly; SameSite=Lax`,
-          },
-        },
-      );
-    }
-
-    if (pathname === "/api/v1/auth/me" && method === "GET") {
-      const user = getAuthUser(req);
-      if (!user) return Response.json({ error: "Unauthorized" }, { status: 401 });
-
-      return Response.json({
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        role: user.role,
-        department: user.department,
-      });
-    }
-
-    if (pathname === "/api/v1/auth/logout" && method === "POST") {
-      return new Response(JSON.stringify({ success: true }), {
-        status: 200,
-        headers: {
-          "Content-Type": "application/json",
-          "Set-Cookie": `meetmind_token=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly`,
         },
       });
     }
@@ -385,8 +1234,14 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
     }
 
     if (pathname === "/api/v1/dashboard/trends" && method === "GET") {
-      const meetings = db.get("meetings");
-      const lectures = db.get("lectures");
+      const user = getAuthUser(req);
+      const admin = isUserAdmin(user);
+      const meetings = admin
+        ? db.get("meetings")
+        : db.get("meetings").filter((m) => m.hostId === user?.id);
+      const lectures = admin
+        ? db.get("lectures")
+        : db.get("lectures").filter((l) => l.instructorId === user?.id);
 
       const dayMap: Record<string, { meetings: number; lectures: number }> = {
         Mon: { meetings: 0, lectures: 0 },
@@ -426,16 +1281,28 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
         { day: "Sun", ...dayMap.Sun },
       ];
 
-      const meetingCount = meetings.length + lectures.length;
-      const meetingTrend = [
-        { m: "W1", value: Math.round(meetingCount * 0.2) },
-        { m: "W2", value: Math.round(meetingCount * 0.4) },
-        { m: "W3", value: Math.round(meetingCount * 0.7) },
-        { m: "W4", value: meetingCount },
-      ];
+      const bucketByWeeks = (items: Array<{ createdAt?: string; date?: string }>) => {
+        const nowMs = Date.now();
+        const buckets = [0, 0, 0, 0];
+        for (const item of items) {
+          const ts = new Date(item.createdAt || item.date || nowMs).getTime();
+          const weeksAgo = Math.floor(Math.max(0, nowMs - ts) / (7 * 24 * 3600 * 1000));
+          const idx = Math.max(0, 3 - Math.min(3, weeksAgo));
+          buckets[idx]++;
+        }
+        return [
+          { m: "W1", value: buckets[0] },
+          { m: "W2", value: buckets[1] },
+          { m: "W3", value: buckets[2] },
+          { m: "W4", value: buckets[3] },
+        ];
+      };
+
+      const meetingTrend = bucketByWeeks(meetings);
+      const lectureTrend = bucketByWeeks(lectures);
 
       return Response.json(
-        { weekly, meetingTrend },
+        { weekly, meetingTrend, lectureTrend },
         {
           headers: {
             "Cache-Control": "private, max-age=15, stale-while-revalidate=60",
@@ -445,8 +1312,14 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
     }
 
     if (pathname === "/api/v1/dashboard/activity" && method === "GET") {
-      const meetings = db.get("meetings");
-      const lectures = db.get("lectures");
+      const user = getAuthUser(req);
+      const admin = isUserAdmin(user);
+      const meetings = admin
+        ? db.get("meetings")
+        : db.get("meetings").filter((m) => m.hostId === user?.id);
+      const lectures = admin
+        ? db.get("lectures")
+        : db.get("lectures").filter((l) => l.instructorId === user?.id);
       const activities: Array<{
         id: string;
         who: string;
@@ -617,6 +1490,12 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
     if (pathname.startsWith("/api/v1/meetings/") && method === "DELETE") {
       const id = pathname.replace("/api/v1/meetings/", "");
       const meeting = db.get("meetings").find((m) => m.id === id);
+      if (!meeting) {
+        return Response.json({ error: "Meeting not found" }, { status: 404 });
+      }
+      if (!currentIsAdmin && meeting.hostId !== currentUser.id) {
+        return Response.json({ error: "Forbidden" }, { status: 403 });
+      }
       if (meeting) {
         if (meeting.recordingPath && fs.existsSync(meeting.recordingPath)) {
           try {
@@ -798,6 +1677,12 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
     if (pathname.startsWith("/api/v1/lectures/") && method === "DELETE") {
       const id = pathname.replace("/api/v1/lectures/", "");
       const lecture = db.get("lectures").find((l) => l.id === id);
+      if (!lecture) {
+        return Response.json({ error: "Lecture not found" }, { status: 404 });
+      }
+      if (!currentIsAdmin && lecture.instructorId !== currentUser.id) {
+        return Response.json({ error: "Forbidden" }, { status: 403 });
+      }
       if (lecture) {
         if (lecture.recordingPath && fs.existsSync(lecture.recordingPath)) {
           try {
@@ -840,6 +1725,206 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
     // ----------------------------------------------------
     // RECORDINGS UPLOAD & TRANSCRIPTION PIPELINE
     // ----------------------------------------------------
+    // CHUNKED BINARY RECORDING UPLOAD (For Large Audio/Video Files > 4MB)
+    // ----------------------------------------------------
+    if (pathname === "/api/v1/recordings/upload/init" && method === "POST") {
+      const user = getAuthUser(req);
+      const body = await req.json();
+      const resourceType: "meeting" | "lecture" = body.type === "lecture" ? "lecture" : "meeting";
+      const fileName = String(body.fileName || "recording.m4a");
+      const title =
+        String(body.title || "").trim() || fileName.replace(/\.[^/.]+$/, "") || "New Recording";
+      const courseCode = String(body.courseCode || "").trim();
+      const language = String(body.language || "auto");
+      const expectedSize = Number(body.fileSize ?? body.totalSize ?? 0);
+      const idempotencyKey =
+        req.headers.get("Idempotency-Key")?.trim() || String(body.idempotencyKey || "");
+
+      if (expectedSize <= 0) {
+        return Response.json({ error: "Uploaded file is empty." }, { status: 400 });
+      }
+      const maxBytes = Number(process.env.MAX_RECORDING_SIZE_MB || 500) * 1024 * 1024;
+      if (expectedSize > maxBytes) {
+        return Response.json(
+          {
+            error: `File exceeds maximum allowed size of ${Math.round(maxBytes / (1024 * 1024))} MB.`,
+          },
+          { status: 413 },
+        );
+      }
+
+      if (idempotencyKey) {
+        const existingJob = db
+          .get("jobs")
+          .find(
+            (j) =>
+              j.idempotencyKey === idempotencyKey &&
+              j.status !== "Failed" &&
+              j.status !== "Cancelled",
+          );
+        if (existingJob) {
+          return Response.json(
+            {
+              deduplicated: true,
+              jobId: existingJob.id,
+              resourceId: existingJob.resourceId,
+              resourceType: existingJob.resourceType,
+              status: existingJob.status,
+            },
+            { status: 202 },
+          );
+        }
+      }
+
+      if (!fs.existsSync(CHUNK_UPLOADS_DIR)) {
+        fs.mkdirSync(CHUNK_UPLOADS_DIR, { recursive: true });
+      }
+
+      const uploadId = `upl_${Date.now()}_${crypto.randomBytes(6).toString("hex")}`;
+      const sessionDir = path.join(CHUNK_UPLOADS_DIR, uploadId);
+      saveUploadSession({
+        uploadId,
+        userId: user?.id || "usr_admin",
+        sessionDir,
+        fileName,
+        resourceType,
+        title,
+        courseCode,
+        language,
+        idempotencyKey,
+        expectedSize,
+        createdAt: Date.now(),
+      });
+
+      return Response.json({ uploadId }, { status: 201 });
+    }
+
+    if (pathname === "/api/v1/recordings/upload/chunk" && method === "POST") {
+      const user = getAuthUser(req);
+      const uploadId = url.searchParams.get("uploadId") || "";
+      const indexParam = Number(
+        url.searchParams.get("index") ?? url.searchParams.get("chunkIndex"),
+      );
+      if (!Number.isInteger(indexParam) || indexParam < 0 || indexParam > 100_000) {
+        return Response.json({ error: "Invalid chunk index." }, { status: 400 });
+      }
+      const session = loadUploadSession(uploadId);
+      if (!session) {
+        return Response.json(
+          { error: "Upload session not found or expired.", category: "IncompleteUpload" },
+          { status: 404 },
+        );
+      }
+      if (!isUserAdmin(user) && session.userId !== user?.id) {
+        return Response.json({ error: "Forbidden." }, { status: 403 });
+      }
+
+      const chunkBuf = Buffer.from(await req.arrayBuffer());
+      if (chunkBuf.length <= 0) {
+        return Response.json({ error: "Empty upload chunk." }, { status: 400 });
+      }
+
+      // Write each chunk to an indexed file so retries overwrite atomically (zero duplicate-byte corruption)
+      fs.mkdirSync(session.sessionDir, { recursive: true });
+      const chunkFile = path.join(
+        session.sessionDir,
+        `chunk_${String(indexParam).padStart(6, "0")}`,
+      );
+      const tmpChunkFile = `${chunkFile}.tmp`;
+      fs.writeFileSync(tmpChunkFile, chunkBuf);
+      fs.renameSync(tmpChunkFile, chunkFile);
+
+      let receivedBytes = 0;
+      for (const f of fs.readdirSync(session.sessionDir)) {
+        if (f.startsWith("chunk_") && !f.endsWith(".tmp")) {
+          receivedBytes += fs.statSync(path.join(session.sessionDir, f)).size;
+        }
+      }
+
+      return Response.json({
+        uploadId,
+        index: indexParam,
+        receivedBytes,
+        expectedSize: session.expectedSize,
+      });
+    }
+
+    if (pathname === "/api/v1/recordings/upload/complete" && method === "POST") {
+      const user = getAuthUser(req);
+      const body = await req.json();
+      const uploadId = String(body.uploadId || "");
+      const session = loadUploadSession(uploadId);
+      if (!session) {
+        return Response.json(
+          { error: "Upload session not found or expired.", category: "IncompleteUpload" },
+          { status: 404 },
+        );
+      }
+      if (!isUserAdmin(user) && session.userId !== user?.id) {
+        return Response.json({ error: "Forbidden." }, { status: 403 });
+      }
+
+      if (!fs.existsSync(session.sessionDir)) {
+        cleanupUploadSession(session);
+        return Response.json(
+          { error: "Uploaded temporary chunks are missing.", category: "StorageError" },
+          { status: 500 },
+        );
+      }
+
+      const chunkFiles = fs
+        .readdirSync(session.sessionDir)
+        .filter((f) => f.startsWith("chunk_") && !f.endsWith(".tmp"))
+        .sort();
+
+      if (chunkFiles.length === 0) {
+        cleanupUploadSession(session);
+        return Response.json(
+          { error: "No upload chunks were received.", category: "IncompleteUpload" },
+          { status: 400 },
+        );
+      }
+
+      const savedPath = resolveSafeRecordingPath(session.fileName);
+      const fd = fs.openSync(savedPath, "w");
+      try {
+        for (const chunkName of chunkFiles) {
+          const data = fs.readFileSync(path.join(session.sessionDir, chunkName));
+          fs.writeSync(fd, data);
+        }
+      } finally {
+        fs.closeSync(fd);
+        cleanupUploadSession(session);
+      }
+
+      const integrity = verifySavedFileIntegrity(savedPath, session.expectedSize);
+      if (!integrity.ok) {
+        try {
+          if (fs.existsSync(savedPath)) fs.unlinkSync(savedPath);
+        } catch {
+          /* ignore */
+        }
+        return Response.json(
+          {
+            error: integrity.error || "Upload was incomplete. Please retry.",
+            category: "IncompleteUpload",
+          },
+          { status: 400 },
+        );
+      }
+
+      return await finalizeUploadedRecording({
+        savedPath,
+        originalFilename: session.fileName,
+        resourceType: session.resourceType,
+        title: session.title,
+        courseCode: session.courseCode,
+        language: session.language,
+        idempotencyKey: session.idempotencyKey,
+        user,
+      });
+    }
+
     if (pathname === "/api/v1/recordings/upload" && method === "POST") {
       const user = getAuthUser(req);
       const headerIdemKey = req.headers.get("Idempotency-Key")?.trim();
@@ -850,6 +1935,7 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
       let originalFilename = "recording.wav";
       let language = "auto";
       let idempotencyKey = headerIdemKey || "";
+      let expectedBytes = 0;
       let buffer: Buffer;
 
       if (contentType.includes("multipart/form-data")) {
@@ -867,6 +1953,7 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
           return Response.json({ error: "Audio or video file is required." }, { status: 400 });
         }
         originalFilename = file.name;
+        expectedBytes = file.size;
         const arrayBuffer = await file.arrayBuffer();
         buffer = Buffer.from(arrayBuffer);
       } else {
@@ -884,6 +1971,7 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
           );
         }
         buffer = Buffer.from(json.audioBase64, "base64");
+        expectedBytes = buffer.length;
       }
 
       if (idempotencyKey) {
@@ -913,14 +2001,20 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
       if (buffer.length <= 0) {
         return Response.json({ error: "Uploaded file is empty." }, { status: 400 });
       }
+      if (expectedBytes > 0 && buffer.length !== expectedBytes) {
+        return Response.json(
+          {
+            error: `Upload was incomplete (${buffer.length} of ${expectedBytes} bytes received). Please retry.`,
+            category: "IncompleteUpload",
+          },
+          { status: 400 },
+        );
+      }
 
-      const safeName = `${Date.now()}_${path.basename(originalFilename).replace(/[^a-zA-Z0-9._-]/g, "_")}`;
-      const savedPath = path.join(RECORDINGS_DIR, safeName);
+      const savedPath = resolveSafeRecordingPath(originalFilename);
       fs.writeFileSync(savedPath, buffer);
-
-      // Strict server-side FFprobe validation (reject empty/corrupted/unsupported/no-audio before queueing)
-      const probe = await validateMediaFile(savedPath, originalFilename);
-      if (!probe.valid) {
+      const integrity = verifySavedFileIntegrity(savedPath, buffer.length);
+      if (!integrity.ok) {
         try {
           if (fs.existsSync(savedPath)) fs.unlinkSync(savedPath);
         } catch {
@@ -928,89 +2022,23 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
         }
         return Response.json(
           {
-            error: probe.error || "Invalid media file.",
-            category: probe.category || "MediaValidationError",
+            error: integrity.error || "Storage write verification failed.",
+            category: "StorageError",
           },
-          { status: 422 },
+          { status: 500 },
         );
       }
 
-      const resourceId = resourceType === "meeting" ? `m_${Date.now()}` : `l_${Date.now()}`;
-      const now = new Date().toISOString();
-
-      if (resourceType === "meeting") {
-        db.update("meetings", (meetings) => [
-          {
-            id: resourceId,
-            workspaceId: "ws_default",
-            title,
-            hostName: user?.name || "Organizer",
-            hostId: user?.id || "usr_admin",
-            date: now.split("T")[0],
-            durationSeconds: probe.durationSeconds,
-            participantsCount: 1,
-            status: "Processing",
-            language,
-            recordingPath: savedPath,
-            recordingFileName: originalFilename,
-            audioUrl: `/api/v1/recordings/audio/${resourceId}`,
-            segments: [],
-            createdAt: now,
-            updatedAt: now,
-          },
-          ...meetings,
-        ]);
-      } else {
-        db.update("lectures", (lectures) => [
-          {
-            id: resourceId,
-            workspaceId: "ws_default",
-            title,
-            courseCode: courseCode || "GEN 101",
-            instructorName: user?.name || "Lecturer",
-            instructorId: user?.id || "usr_admin",
-            date: now.split("T")[0],
-            durationSeconds: probe.durationSeconds,
-            status: "Processing",
-            language,
-            recordingPath: savedPath,
-            recordingFileName: originalFilename,
-            audioUrl: `/api/v1/recordings/audio/${resourceId}`,
-            segments: [],
-            createdAt: now,
-            updatedAt: now,
-          },
-          ...lectures,
-        ]);
-      }
-
-      const job = createJob(resourceType, resourceId, originalFilename, savedPath, language, {
-        userId: user?.id || "usr_admin",
-        idempotencyKey: idempotencyKey || undefined,
+      return await finalizeUploadedRecording({
+        savedPath,
+        originalFilename,
+        resourceType,
+        title,
+        courseCode,
+        language,
+        idempotencyKey,
+        user,
       });
-
-      setTimeout(() => {
-        void processRecordingJob(
-          job.id,
-          resourceType,
-          resourceId,
-          savedPath,
-          originalFilename,
-          language,
-        );
-      }, 50);
-
-      return Response.json(
-        {
-          message: "Recording accepted for transcription and analysis",
-          jobId: job.id,
-          resourceId,
-          resourceType,
-          durationSeconds: probe.durationSeconds,
-          status: "Queued",
-        },
-        { status: 202 },
-      );
     }
 
     if (pathname === "/api/v1/recordings/all" && method === "DELETE") {
@@ -1048,6 +2076,22 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
         }
       }
 
+      // Cancel any active background jobs for deleted resources so no orphaned jobs remain
+      const activeJobs = (db.get("jobs") || []).filter(
+        (j) =>
+          idSet.has(j.resourceId) &&
+          j.status !== "Completed" &&
+          j.status !== "Failed" &&
+          j.status !== "Cancelled",
+      );
+      for (const j of activeJobs) {
+        try {
+          cancelJob(j.id);
+        } catch {
+          /* ignore */
+        }
+      }
+
       db.update("deletedResourceIds", (list = []) => Array.from(new Set([...list, ...ids])));
       db.update("meetings", (list) => list.filter((m) => !idSet.has(m.id)));
       db.update("lectures", (list) => list.filter((l) => !idSet.has(l.id)));
@@ -1065,6 +2109,9 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
       );
       db.update("mindMaps", (list) =>
         list.filter((m) => !idSet.has(m.meetingId || "") && !idSet.has(m.lectureId || "")),
+      );
+      db.update("chatMessages", (list = []) =>
+        list.filter((msg) => !msg.resourceId || !idSet.has(msg.resourceId)),
       );
       db.update("calendarEvents", (list) => list.filter((e) => !idSet.has(e.referenceId || "")));
       db.update("jobs", (list) => list.filter((j) => !idSet.has(j.resourceId)));
@@ -2256,6 +3303,8 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
     }
 
     if (pathname === "/api/v1/ai/ask" && method === "POST") {
+      const user = getAuthUser(req);
+      const admin = isUserAdmin(user);
       const body = await req.json();
       const { question, resourceId, recordingId, history } = body;
 
@@ -2267,9 +3316,28 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
         question: question.trim(),
         resourceId: resourceId || recordingId,
         history: Array.isArray(history) ? history : [],
+        userId: user?.id || "usr_admin",
+        isAdmin: admin,
       });
 
+      if (result.forbidden) {
+        return Response.json(
+          { error: "You do not have permission to query this recording." },
+          { status: 403 },
+        );
+      }
+
       return Response.json(result);
+    }
+
+    if (pathname === "/api/v1/ai/chat-history" && method === "GET") {
+      const user = getAuthUser(req);
+      const admin = isUserAdmin(user);
+      const resourceId = url.searchParams.get("resourceId");
+      const messages = (db.get("chatMessages") || []).filter(
+        (m) => (admin || m.userId === user?.id) && (!resourceId || m.resourceId === resourceId),
+      );
+      return Response.json(messages.slice(-50));
     }
 
     if (pathname === "/api/v1/ai/analyze" && method === "POST") {
@@ -2335,26 +3403,34 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
 
     if (pathname.startsWith("/api/v1/tasks/") && method === "PUT") {
       const id = pathname.replace("/api/v1/tasks/", "");
-      const updates = await req.json();
+      const existingTask = db.get("actionItems").find((item) => item.id === id);
+      if (!existingTask) return Response.json({ error: "Task not found" }, { status: 404 });
+      const ownedIds = getScopedResourceIds(currentUser);
+      const isTaskOwner =
+        currentIsAdmin ||
+        existingTask.userId === currentUser.id ||
+        ownedIds.has(existingTask.meetingId || existingTask.lectureId || "");
+      if (!isTaskOwner) return Response.json({ error: "Forbidden" }, { status: 403 });
 
-      let found = false;
+      const updates = await req.json();
       const updated = db.update("actionItems", (items) =>
-        items.map((item) => {
-          if (item.id === id) {
-            found = true;
-            return { ...item, ...updates };
-          }
-          return item;
-        }),
+        items.map((item) => (item.id === id ? { ...item, ...updates, userId: item.userId } : item)),
       );
 
-      if (!found) return Response.json({ error: "Task not found" }, { status: 404 });
-      const item = updated.find((t) => t.id === id);
-      return Response.json(item);
+      return Response.json(updated.find((t) => t.id === id));
     }
 
     if (pathname.startsWith("/api/v1/tasks/") && method === "DELETE") {
       const id = pathname.replace("/api/v1/tasks/", "");
+      const existingTask = db.get("actionItems").find((item) => item.id === id);
+      if (!existingTask) return Response.json({ error: "Task not found" }, { status: 404 });
+      const ownedIds = getScopedResourceIds(currentUser);
+      const isTaskOwner =
+        currentIsAdmin ||
+        existingTask.userId === currentUser.id ||
+        ownedIds.has(existingTask.meetingId || existingTask.lectureId || "");
+      if (!isTaskOwner) return Response.json({ error: "Forbidden" }, { status: 403 });
+
       db.update("actionItems", (all) => all.filter((t) => t.id !== id));
       return Response.json({ success: true, id });
     }
@@ -2364,7 +3440,10 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
     // ----------------------------------------------------
     if (pathname === "/api/v1/quizzes/attempts" && method === "GET") {
       const quizId = url.searchParams.get("quizId");
-      const attempts = db.get("quizAttempts") || [];
+      const ownedIds = getScopedResourceIds(currentUser);
+      const attempts = (db.get("quizAttempts") || []).filter(
+        (a) => currentIsAdmin || a.userId === currentUser.id || ownedIds.has(a.lectureId || ""),
+      );
       if (quizId) {
         return Response.json(attempts.filter((a) => a.quizId === quizId));
       }
@@ -2375,7 +3454,9 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
       const body = await req.json();
       const { lectureId, avoidQuestionTitles = [], variant = 2 } = body;
 
-      const lecture = db.get("lectures").find((l) => l.id === lectureId);
+      const lecture = db
+        .get("lectures")
+        .find((l) => l.id === lectureId && (currentIsAdmin || l.instructorId === currentUser.id));
       if (!lecture) {
         return Response.json({ error: "Lecture not found" }, { status: 404 });
       }
@@ -2412,7 +3493,11 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
     }
 
     if (pathname === "/api/v1/quizzes" && method === "GET") {
-      return Response.json(db.get("quizzes"));
+      const ownedIds = getScopedResourceIds(currentUser);
+      const scoped = currentIsAdmin
+        ? db.get("quizzes")
+        : db.get("quizzes").filter((q) => ownedIds.has(q.lectureId || q.meetingId || ""));
+      return Response.json(scoped);
     }
 
     if (
@@ -2421,9 +3506,14 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
       method === "GET"
     ) {
       const id = pathname.replace("/api/v1/quizzes/", "");
+      const ownedIds = getScopedResourceIds(currentUser);
       const quiz = db
         .get("quizzes")
-        .find((q) => q.id === id || q.lectureId === id || q.meetingId === id);
+        .find(
+          (q) =>
+            (q.id === id || q.lectureId === id || q.meetingId === id) &&
+            (currentIsAdmin || ownedIds.has(q.lectureId || q.meetingId || "")),
+        );
       if (!quiz) return Response.json({ error: "Quiz not found" }, { status: 404 });
       return Response.json(quiz);
     }
@@ -2435,12 +3525,18 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
     ) {
       const id = pathname.replace("/api/v1/quizzes/", "").replace("/attempt", "");
       const body = await req.json();
-      const { answers = {}, userId = "usr_admin" } = body as {
+      const { answers = {} } = body as {
         answers: Record<string, string | number>;
-        userId?: string;
       };
+      // Always derive user identity from the verified JWT — never trust client-supplied userId
+      const userId = currentUser.id;
+      const ownedIds = getScopedResourceIds(currentUser);
 
-      const quiz = db.get("quizzes").find((q) => q.id === id);
+      const quiz = db
+        .get("quizzes")
+        .find(
+          (q) => q.id === id && (currentIsAdmin || ownedIds.has(q.lectureId || q.meetingId || "")),
+        );
       if (!quiz) return Response.json({ error: "Quiz not found" }, { status: 404 });
 
       // Normalization helper for Arabic text (strips diacritics, tatweel, extra spaces)
@@ -2529,30 +3625,43 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
     // FLASHCARDS
     // ----------------------------------------------------
     if (pathname === "/api/v1/flashcards" && method === "GET") {
-      return Response.json(db.get("flashcards"));
+      const ownedIds = getScopedResourceIds(currentUser);
+      const scoped = currentIsAdmin
+        ? db.get("flashcards")
+        : db
+            .get("flashcards")
+            .filter(
+              (c) =>
+                ownedIds.has(c.lectureId || c.meetingId || "") ||
+                ownedIds.has((c.deckId || "").replace(/^deck_/, "")),
+            );
+      return Response.json(scoped);
     }
 
     if (pathname.startsWith("/api/v1/flashcards/") && method === "PUT") {
       const id = pathname.replace("/api/v1/flashcards/", "");
+      const ownedIds = getScopedResourceIds(currentUser);
+      const existingCard = db.get("flashcards").find((c) => c.id === id);
+      if (!existingCard) return Response.json({ error: "Flashcard not found" }, { status: 404 });
+      const ownsCard =
+        currentIsAdmin ||
+        ownedIds.has(existingCard.lectureId || existingCard.meetingId || "") ||
+        ownedIds.has((existingCard.deckId || "").replace(/^deck_/, ""));
+      if (!ownsCard) return Response.json({ error: "Forbidden" }, { status: 403 });
+
       const updates = await req.json();
-
-      let found = false;
       const updated = db.update("flashcards", (cards) =>
-        cards.map((c) => {
-          if (c.id === id) {
-            found = true;
-            return {
-              ...c,
-              ...updates,
-              reviewCount:
-                updates.reviewCount !== undefined ? updates.reviewCount : c.reviewCount + 1,
-            };
-          }
-          return c;
-        }),
+        cards.map((c) =>
+          c.id === id
+            ? {
+                ...c,
+                ...updates,
+                reviewCount:
+                  updates.reviewCount !== undefined ? updates.reviewCount : c.reviewCount + 1,
+              }
+            : c,
+        ),
       );
-
-      if (!found) return Response.json({ error: "Flashcard not found" }, { status: 404 });
       return Response.json(updated.find((c) => c.id === id));
     }
 
@@ -2560,16 +3669,20 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
       const body = await req.json();
       const { lectureId, meetingId } = body;
       const targetId = lectureId || meetingId;
-      const lecture = targetId
-        ? db.get("lectures").find((l) => l.id === targetId)
-        : db.get("lectures")[0];
-      const meeting = targetId ? db.get("meetings").find((m) => m.id === targetId) : undefined;
+      const ownedLectures = currentIsAdmin
+        ? db.get("lectures")
+        : db.get("lectures").filter((l) => l.instructorId === currentUser.id);
+      const ownedMeetings = currentIsAdmin
+        ? db.get("meetings")
+        : db.get("meetings").filter((m) => m.hostId === currentUser.id);
+      const lecture = targetId ? ownedLectures.find((l) => l.id === targetId) : ownedLectures[0];
+      const meeting = targetId ? ownedMeetings.find((m) => m.id === targetId) : undefined;
       const resource = lecture || meeting;
 
       if (!resource) {
         return Response.json(
-          { error: "No lecture or meeting found for flashcard generation" },
-          { status: 400 },
+          { error: "No authorized lecture or meeting found for flashcard generation" },
+          { status: 404 },
         );
       }
 
@@ -2587,8 +3700,12 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
         deckTitle:
           resource.title.length > 35 ? resource.title.slice(0, 35) + "..." : resource.title,
         lectureId: "courseCode" in resource ? resource.id : undefined,
+        meetingId: !("courseCode" in resource) ? resource.id : undefined,
         front: c.front,
         back: c.back,
+        sourceReference: c.sourceReference,
+        topic: c.topic,
+        difficulty: c.difficulty,
         mastered: false,
         reviewCount: 0,
         createdAt: now,
@@ -2606,23 +3723,31 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
     // MIND MAPS
     // ----------------------------------------------------
     if (pathname === "/api/v1/mindmaps" && method === "GET") {
-      return Response.json(db.get("mindMaps"));
+      const ownedIds = getScopedResourceIds(currentUser);
+      const scoped = currentIsAdmin
+        ? db.get("mindMaps")
+        : db.get("mindMaps").filter((m) => ownedIds.has(m.lectureId || m.meetingId || ""));
+      return Response.json(scoped);
     }
 
     if (pathname === "/api/v1/mindmaps/generate" && method === "POST") {
       const body = await req.json();
       const { lectureId, meetingId } = body;
       const targetId = lectureId || meetingId;
-      const lecture = targetId
-        ? db.get("lectures").find((l) => l.id === targetId)
-        : db.get("lectures")[0];
-      const meeting = targetId ? db.get("meetings").find((m) => m.id === targetId) : undefined;
+      const ownedLectures = currentIsAdmin
+        ? db.get("lectures")
+        : db.get("lectures").filter((l) => l.instructorId === currentUser.id);
+      const ownedMeetings = currentIsAdmin
+        ? db.get("meetings")
+        : db.get("meetings").filter((m) => m.hostId === currentUser.id);
+      const lecture = targetId ? ownedLectures.find((l) => l.id === targetId) : ownedLectures[0];
+      const meeting = targetId ? ownedMeetings.find((m) => m.id === targetId) : undefined;
       const resource = lecture || meeting;
 
       if (!resource) {
         return Response.json(
-          { error: "No lecture or meeting found for mind map generation" },
-          { status: 400 },
+          { error: "No authorized lecture or meeting found for mind map generation" },
+          { status: 404 },
         );
       }
 
@@ -2657,7 +3782,14 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
     // CALENDAR
     // ----------------------------------------------------
     if (pathname === "/api/v1/calendar" && method === "GET") {
-      return Response.json(db.get("calendarEvents"));
+      const ownedIds = getScopedResourceIds(currentUser);
+      const scoped = currentIsAdmin
+        ? db.get("calendarEvents")
+        : db.get("calendarEvents").filter((e) => {
+            const ownerId = (e as { userId?: string }).userId;
+            return ownerId === currentUser.id || (e.referenceId && ownedIds.has(e.referenceId));
+          });
+      return Response.json(scoped);
     }
 
     if (pathname === "/api/v1/calendar" && method === "POST") {
@@ -2665,6 +3797,7 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
       const { title, date, time, kind, attendeesCount } = body;
       const newEvent = {
         id: `ev_${Date.now()}`,
+        userId: currentUser.id,
         title,
         date,
         time: time || "10:00 AM",
@@ -2679,7 +3812,20 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
     // NOTIFICATIONS
     // ----------------------------------------------------
     if (pathname === "/api/v1/notifications" && method === "GET") {
-      return Response.json(db.get("notifications"));
+      const ownedIds = getScopedResourceIds(currentUser);
+      const scoped = currentIsAdmin
+        ? db.get("notifications")
+        : db.get("notifications").filter((n) => {
+            const ownerId = (n as { userId?: string }).userId;
+            if (ownerId) return ownerId === currentUser.id;
+            if (n.targetUrl) {
+              for (const rid of ownedIds) {
+                if (n.targetUrl.includes(rid)) return true;
+              }
+            }
+            return false;
+          });
+      return Response.json(scoped);
     }
 
     if (
@@ -2695,17 +3841,34 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
     }
 
     if (pathname === "/api/v1/notifications/read-all" && method === "PUT") {
-      db.update("notifications", (notifs) => notifs.map((n) => ({ ...n, read: true })));
+      db.update("notifications", (notifs) =>
+        notifs.map((n) => {
+          const ownerId = (n as { userId?: string }).userId;
+          if (currentIsAdmin || ownerId === currentUser.id) return { ...n, read: true };
+          return n;
+        }),
+      );
       return Response.json({ success: true });
     }
 
     // ----------------------------------------------------
-    // REPORTS & EXPORT
+    // REPORTS & EXPORT (STRICT USER ISOLATION)
     // ----------------------------------------------------
     if (pathname === "/api/v1/reports" && method === "GET") {
-      const meetings = db.get("meetings");
-      const lectures = db.get("lectures");
-      const tasks = db.get("actionItems");
+      const meetings = currentIsAdmin
+        ? db.get("meetings")
+        : db.get("meetings").filter((m) => m.hostId === currentUser.id);
+      const lectures = currentIsAdmin
+        ? db.get("lectures")
+        : db.get("lectures").filter((l) => l.instructorId === currentUser.id);
+      const ownedIds = new Set([...meetings.map((m) => m.id), ...lectures.map((l) => l.id)]);
+      const tasks = currentIsAdmin
+        ? db.get("actionItems")
+        : db
+            .get("actionItems")
+            .filter(
+              (t) => t.userId === currentUser.id || ownedIds.has(t.meetingId || t.lectureId || ""),
+            );
 
       return Response.json({
         totalRecordings: meetings.length + lectures.length,
@@ -2736,12 +3899,18 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
     }
 
     if (pathname === "/api/v1/reports/export" && method === "GET") {
-      const meetings = db.get("meetings");
+      const meetings = currentIsAdmin
+        ? db.get("meetings")
+        : db.get("meetings").filter((m) => m.hostId === currentUser.id);
+      const lectures = currentIsAdmin
+        ? db.get("lectures")
+        : db.get("lectures").filter((l) => l.instructorId === currentUser.id);
+
       let csv = "ID,Type,Title,Date,DurationMinutes,Status\n";
       for (const m of meetings) {
         csv += `"${m.id}","Meeting","${m.title.replace(/"/g, '""')}","${m.date}",${Math.round(m.durationSeconds / 60)},"${m.status}"\n`;
       }
-      for (const l of db.get("lectures")) {
+      for (const l of lectures) {
         csv += `"${l.id}","Lecture","${l.title.replace(/"/g, '""')}","${l.date}",${Math.round(l.durationSeconds / 60)},"${l.status}"\n`;
       }
       return new Response(csv, {
@@ -2753,7 +3922,7 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
     }
 
     // ----------------------------------------------------
-    // SEARCH
+    // SEARCH (STRICT USER ISOLATION)
     // ----------------------------------------------------
     if (pathname === "/api/v1/search" && method === "GET") {
       const q = (url.searchParams.get("q") || "").trim();
@@ -2761,21 +3930,37 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
         return Response.json({ meetings: [], lectures: [], tasks: [], transcripts: [] });
       }
 
-      const meetings = db
-        .get("meetings")
-        .filter((m) => matchesArabicQuery(m.title, q) || matchesArabicQuery(m.summary, q));
+      const ownedMeetings = currentIsAdmin
+        ? db.get("meetings")
+        : db.get("meetings").filter((m) => m.hostId === currentUser.id);
+      const ownedLectures = currentIsAdmin
+        ? db.get("lectures")
+        : db.get("lectures").filter((l) => l.instructorId === currentUser.id);
+      const ownedIds = new Set([
+        ...ownedMeetings.map((m) => m.id),
+        ...ownedLectures.map((l) => l.id),
+      ]);
+      const ownedTasks = currentIsAdmin
+        ? db.get("actionItems")
+        : db
+            .get("actionItems")
+            .filter(
+              (t) => t.userId === currentUser.id || ownedIds.has(t.meetingId || t.lectureId || ""),
+            );
 
-      const lectures = db
-        .get("lectures")
-        .filter(
-          (l) =>
-            matchesArabicQuery(l.title, q) ||
-            matchesArabicQuery(l.courseCode, q) ||
-            matchesArabicQuery(l.summary, q) ||
-            matchesArabicQuery(l.studyNotes, q),
-        );
+      const meetings = ownedMeetings.filter(
+        (m) => matchesArabicQuery(m.title, q) || matchesArabicQuery(m.summary, q),
+      );
 
-      const tasks = db.get("actionItems").filter((t) => matchesArabicQuery(t.title, q));
+      const lectures = ownedLectures.filter(
+        (l) =>
+          matchesArabicQuery(l.title, q) ||
+          matchesArabicQuery(l.courseCode, q) ||
+          matchesArabicQuery(l.summary, q) ||
+          matchesArabicQuery(l.studyNotes, q),
+      );
+
+      const tasks = ownedTasks.filter((t) => matchesArabicQuery(t.title, q));
 
       const transcripts: {
         id: string;
@@ -2786,8 +3971,7 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
         time: number;
       }[] = [];
 
-      // Search meeting transcripts
-      for (const m of db.get("meetings")) {
+      for (const m of ownedMeetings) {
         for (const seg of m.segments || []) {
           if (matchesArabicQuery(seg.text, q)) {
             transcripts.push({
@@ -2803,8 +3987,7 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
         if (transcripts.length >= 40) break;
       }
 
-      // Search lecture transcripts
-      for (const l of db.get("lectures")) {
+      for (const l of ownedLectures) {
         for (const seg of l.segments || []) {
           if (matchesArabicQuery(seg.text, q)) {
             transcripts.push({
@@ -2831,10 +4014,19 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
     }
 
     // ----------------------------------------------------
-    // USERS & WORKSPACE
+    // USERS & WORKSPACE (STRICT ROLE & GUEST PERMISSIONS)
     // ----------------------------------------------------
     if (pathname === "/api/v1/users" && method === "GET") {
-      const users = db.get("users").map((u) => ({
+      if (currentIsGuest) {
+        return Response.json(
+          { error: "Guest sessions cannot access workspace user directories." },
+          { status: 403 },
+        );
+      }
+      const list = currentIsAdmin
+        ? (db.get("users") || []).filter((u) => !u.isGuest)
+        : [currentUser];
+      const users = list.map((u) => ({
         id: u.id,
         name: u.name,
         email: u.email,
@@ -2842,37 +4034,78 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
         department: u.department,
         initials: u.name
           .split(" ")
+          .filter(Boolean)
           .map((n) => n[0])
-          .join(""),
+          .join("")
+          .slice(0, 2)
+          .toUpperCase(),
       }));
       return Response.json(users);
     }
 
     if (pathname === "/api/v1/users" && method === "POST") {
+      if (!currentIsAdmin || currentIsGuest) {
+        return Response.json(
+          { error: "Administrator privileges are required to create users." },
+          { status: 403 },
+        );
+      }
       const body = await req.json();
-      const { email, name, role, department } = body;
-      if (!email || !name) {
-        return Response.json({ error: "Name and email are required" }, { status: 400 });
+      const email = normalizeEmail(body.email);
+      const name = String(body.name || "").trim();
+      const password = typeof body.password === "string" ? body.password : "";
+      if (!email || !validateEmailAddress(email) || !name) {
+        return Response.json({ error: "Valid name and email are required." }, { status: 400 });
+      }
+      const strength = validatePasswordStrength(password);
+      if (!strength.valid) {
+        return Response.json({ error: strength.error }, { status: 400 });
+      }
+      if (db.get("users").some((u) => normalizeEmail(u.email) === email)) {
+        return Response.json({ error: "Email already registered." }, { status: 409 });
       }
 
       const newUser: UserRecord = {
-        id: `usr_${Date.now()}`,
+        id: `usr_${Date.now().toString(36)}_${crypto.randomBytes(6).toString("hex")}`,
         email,
         name,
-        passwordHash: hashPassword("welcome123"),
-        role: role || "member",
-        department: department || "Engineering",
+        passwordHash: hashPasswordSecure(password),
+        role: body.role || "member",
+        authProvider: "local",
+        isGuest: false,
+        department: body.department || "Engineering",
         createdAt: new Date().toISOString(),
       };
 
       db.update("users", (all) => [...all, newUser]);
-      return Response.json(newUser, { status: 201 });
+      return Response.json(sanitizePublicUser(newUser), { status: 201 });
+    }
+
+    if (pathname.startsWith("/api/v1/users/") && method === "GET") {
+      const requestedId = decodeURIComponent(pathname.slice("/api/v1/users/".length)).trim();
+      if (currentIsGuest || (!currentIsAdmin && requestedId !== currentUser.id)) {
+        return Response.json(
+          { error: "You are not authorized to view another user's profile." },
+          { status: 403 },
+        );
+      }
+      const target = (db.get("users") || []).find((u) => u.id === requestedId && !u.isGuest);
+      if (!target) {
+        return Response.json({ error: "User not found." }, { status: 404 });
+      }
+      return Response.json(sanitizePublicUser(target));
     }
 
     // ----------------------------------------------------
-    // SYSTEM ADMINISTRATION: RESET & BACKUP
+    // SYSTEM ADMINISTRATION: RESET & BACKUP (ADMIN ONLY)
     // ----------------------------------------------------
     if (pathname === "/api/v1/system/reset" && method === "POST") {
+      if (!currentIsAdmin || currentIsGuest) {
+        return Response.json(
+          { error: "Administrator privileges are required for system reset." },
+          { status: 403 },
+        );
+      }
       const body = await req.json().catch(() => ({}));
       if (!body.confirm) {
         return Response.json(
@@ -2881,10 +4114,8 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
         );
       }
 
-      // Reset the database to clean zero state
       db.resetData();
 
-      // Clean out physical audio recording files
       if (fs.existsSync(RECORDINGS_DIR)) {
         try {
           const files = fs.readdirSync(RECORDINGS_DIR);
@@ -2911,6 +4142,12 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
     }
 
     if (pathname === "/api/v1/system/backup" && (method === "GET" || method === "HEAD")) {
+      if (!currentIsAdmin || currentIsGuest) {
+        return Response.json(
+          { error: "Administrator privileges are required to export backups." },
+          { status: 403 },
+        );
+      }
       const backup = db.backupData();
       return new Response(JSON.stringify(backup, null, 2), {
         headers: {
@@ -2921,6 +4158,12 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
     }
 
     if (pathname === "/api/v1/system/restore" && method === "POST") {
+      if (!currentIsAdmin || currentIsGuest) {
+        return Response.json(
+          { error: "Administrator privileges are required to restore backups." },
+          { status: 403 },
+        );
+      }
       const body = await req.json();
       db.restoreData(body);
       return Response.json({
@@ -2933,7 +4176,7 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
   } catch (error) {
     console.error(`[API Error]:`, error);
     return Response.json(
-      { error: error instanceof Error ? error.message : "Internal Server Error" },
+      { error: "An unexpected server error occurred. Please try again." },
       { status: 500 },
     );
   }

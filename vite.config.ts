@@ -6,12 +6,50 @@
 // You can pass additional config via defineConfig({ vite: { ... }, etc... }) if needed.
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
+function parseEnvHosts(): string[] {
+  const hosts: string[] = [];
+  const rawList = process.env.VITE_ALLOWED_HOSTS || "";
+  for (const entry of rawList.split(",")) {
+    const trimmed = entry.trim().toLowerCase();
+    if (trimmed && /^[a-z0-9.-]+$/.test(trimmed)) {
+      hosts.push(trimmed);
+    }
+  }
+  for (const urlVar of [process.env.PUBLIC_APP_URL, process.env.APP_URL]) {
+    if (!urlVar) continue;
+    try {
+      const hostname = new URL(urlVar).hostname.toLowerCase();
+      if (hostname) hosts.push(hostname);
+    } catch {
+      // ignore malformed URL env values
+    }
+  }
+  return hosts;
+}
+
+const allowedPreviewHosts = Array.from(
+  new Set([
+    "localhost",
+    "127.0.0.1",
+    "meetmind-atlas.ai.studio",
+    "project-graduation.ai.studio",
+    ".ai.studio",
+    "ais-dev-ylbfqaeognwr3zaimsleqn-422352775581.europe-west1.run.app",
+    "ais-pre-ylbfqaeognwr3zaimsleqn-422352775581.europe-west1.run.app",
+    ...parseEnvHosts(),
+  ]),
+);
+
 export default defineConfig({
   vite: {
     server: {
       host: "0.0.0.0",
       port: 3000,
       strictPort: true,
+      allowedHosts: allowedPreviewHosts,
+    },
+    preview: {
+      allowedHosts: allowedPreviewHosts,
     },
     build: {
       rollupOptions: {

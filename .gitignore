@@ -31,9 +31,16 @@ dist-ssr
 *.sln
 *.sw?
 
+# Environment secrets (keep .env.example tracked)
+.env
+.env.*
+!.env.example
+
 # Runtime data & AI models
 data/recordings/*
 !data/recordings/.gitkeep
+data/avatars/*
+!data/avatars/.gitkeep
 services/ai_service/packages/
 services/ai_service/models/
 

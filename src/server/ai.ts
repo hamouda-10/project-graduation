@@ -1,5 +1,6 @@
+import { ThinkingLevel } from "@google/genai";
 import { db, TranscriptSegment, MindMapNode } from "./db";
-import { getGeminiClient } from "./gemini";
+import { extractGeminiTranscriptText, getGeminiClient } from "./gemini";
 
 export interface AIAnalysisResult {
   summary: string;
@@ -236,7 +237,7 @@ async function prepareTranscriptForLlm(
   for (let idx = 0; idx < chunks.length; idx++) {
     try {
       const resp = await ai.models.generateContent({
-        model: "gemini-4-hydrogen",
+        model: "gemini-3.1-flash-lite",
         contents: `Extract all key facts, definitions, technical terms, decisions, tasks, speakers, and timestamps from part ${idx + 1}/${chunks.length} of "${title}". Be faithful to the transcript and omit nothing important:\n\n${chunks[idx]}`,
       });
       const text = (resp.text || "").trim();
@@ -343,24 +344,49 @@ Rules:
 1. Return ONLY the exact spoken words cleanly without speaker labels, timestamps, or commentary.
 2. If the audio clip contains only silence or noise with no speech, reply with exact token: [SILENCE]`;
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-transcribe",
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                mimeType: safeMime,
-                data: audioBase64,
+      let rawOutput = "";
+      try {
+        const response = await ai.models.generateContent({
+          model: "gemini-3.5-transcribe",
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: safeMime,
+                  data: audioBase64,
+                },
               },
-            },
-            {
-              text: promptText,
-            },
-          ],
-        },
-      });
+              {
+                text: promptText,
+              },
+            ],
+          },
+        });
+        rawOutput = extractGeminiTranscriptText(response);
+      } catch {
+        // Fall through to secondary multimodal ASR
+      }
 
-      const rawOutput = (response.text || "").trim();
+      if (!rawOutput) {
+        const fallbackResp = await ai.models.generateContent({
+          model: "gemini-3.1-flash-lite",
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: safeMime,
+                  data: audioBase64,
+                },
+              },
+              {
+                text: promptText,
+              },
+            ],
+          },
+        });
+        rawOutput = extractGeminiTranscriptText(fallbackResp);
+      }
+
       if (
         rawOutput &&
         !rawOutput.includes("[صمت]") &&
@@ -486,7 +512,7 @@ ${preparedTranscript}
 (إذا كانت محاضرة تعليمية، استخلص النقاط المرشحة للمراجعة أو الأسئلة التي طرحها الطلاب أو المحاضر)`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-4-hydrogen",
+        model: "gemini-3.1-flash-lite",
         contents: prompt,
       });
 
@@ -650,7 +676,7 @@ ${summaryText || ""}
 ]`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-4-hydrogen",
+        model: "gemini-3.1-flash-lite",
         contents: prompt,
         config: {
           responseMimeType: "application/json",
@@ -701,6 +727,7 @@ ${summaryText || ""}
             sectionRef:
               q.sectionRef || (detectedLang === "en" ? "Transcript Section" : "محاور الجلسة"),
             timestampRef: q.timestampRef || "00:00",
+            sourceReference: `${q.sectionRef || "Transcript"} [${q.timestampRef || "00:00"}]`,
           })),
         };
       }
@@ -931,7 +958,7 @@ ${preparedTranscript}
 }`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-4-hydrogen",
+        model: "gemini-3.1-flash-lite",
         contents: prompt,
         config: { responseMimeType: "application/json" },
       });
@@ -1158,29 +1185,97 @@ export async function askMeetMindAI({
   question,
   resourceId,
   history = [],
+  userId = "usr_admin",
+  isAdmin = true,
 }: {
   question: string;
   resourceId?: string;
   history?: Array<{ role: "user" | "model"; text: string }>;
+  userId?: string;
+  isAdmin?: boolean;
 }): Promise<{
   answer: string;
   evidenceFound: boolean;
   citations: { speaker: string; timestamp: string; quote: string }[];
   suggestedFollowUps?: string[];
+  forbidden?: boolean;
 }> {
-  const meetings = db.get("meetings");
-  const lectures = db.get("lectures");
-  const tasks = db.get("actionItems");
+  const allMeetings = db.get("meetings");
+  const allLectures = db.get("lectures");
+  const allTasks = db.get("actionItems");
+  const allQuizzes = db.get("quizzes");
+  const allFlashcards = db.get("flashcards");
+
+  const meetings = isAdmin ? allMeetings : allMeetings.filter((m) => m.hostId === userId);
+  const lectures = isAdmin ? allLectures : allLectures.filter((l) => l.instructorId === userId);
+  const allowedIds = new Set([...meetings.map((m) => m.id), ...lectures.map((l) => l.id)]);
+  const tasks = isAdmin
+    ? allTasks
+    : allTasks.filter(
+        (t) => t.userId === userId || allowedIds.has(t.meetingId || t.lectureId || ""),
+      );
+  const quizzes = isAdmin
+    ? allQuizzes
+    : allQuizzes.filter((q) => allowedIds.has(q.lectureId || q.meetingId || ""));
+  const flashcards = isAdmin
+    ? allFlashcards
+    : allFlashcards.filter((f) =>
+        allowedIds.has(f.lectureId || f.meetingId || f.deckId.replace("deck_", "")),
+      );
+
+  const persistChatTurn = (res: {
+    answer: string;
+    evidenceFound: boolean;
+    citations: { speaker: string; timestamp: string; quote: string }[];
+  }) => {
+    const now = new Date().toISOString();
+    db.update("chatMessages", (msgs = []) => [
+      ...msgs.slice(-198),
+      {
+        id: `msg_u_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        userId,
+        resourceId,
+        role: "user" as const,
+        content: question,
+        createdAt: now,
+      },
+      {
+        id: `msg_a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        userId,
+        resourceId,
+        role: "assistant" as const,
+        content: res.answer,
+        evidenceFound: res.evidenceFound,
+        citations: res.citations,
+        createdAt: now,
+      },
+    ]);
+  };
+
+  if (resourceId) {
+    const existsAnywhere =
+      allMeetings.some((m) => m.id === resourceId) || allLectures.some((l) => l.id === resourceId);
+    if (existsAnywhere && !allowedIds.has(resourceId)) {
+      return {
+        answer: "Access denied to this recording.",
+        evidenceFound: false,
+        citations: [],
+        forbidden: true,
+      };
+    }
+  }
 
   const targetMeeting = resourceId ? meetings.find((m) => m.id === resourceId) : undefined;
   const targetLecture = resourceId ? lectures.find((l) => l.id === resourceId) : undefined;
 
   if (resourceId && !targetMeeting && !targetLecture) {
-    return {
+    const missing = {
       answer: "Not mentioned in this recording.",
       evidenceFound: false,
       citations: [],
     };
+    persistChatTurn(missing);
+    return missing;
   }
 
   const targetItem = targetLecture || targetMeeting;
@@ -1205,11 +1300,13 @@ export async function askMeetMindAI({
           evidenceFound: boolean;
           citations: { speaker: string; timestamp: string; quote: string }[];
         };
-        return {
+        const out = {
           answer: data.evidenceFound ? data.answer : "Not mentioned in this recording.",
           evidenceFound: data.evidenceFound,
           citations: data.citations || [],
         };
+        persistChatTurn(out);
+        return out;
       }
     } catch {
       // Fallback seamlessly to Gemini or deterministic transcript search
@@ -1220,14 +1317,16 @@ export async function askMeetMindAI({
   const latestMeeting = meetings[0];
 
   if (targetItem && targetSegments.length === 0) {
-    return {
+    const emptyRes = {
       answer: "Not mentioned in this recording.",
       evidenceFound: false,
       citations: [],
     };
+    persistChatTurn(emptyRes);
+    return emptyRes;
   }
 
-  // Build grounded transcript context
+  // Build grounded transcript + metadata context (strictly scoped to authorized user recordings)
   let contextDetails = "";
   const lecturesToInclude = targetLecture
     ? [targetLecture]
@@ -1237,6 +1336,10 @@ export async function askMeetMindAI({
   for (const l of lecturesToInclude) {
     contextDetails += `[Lecture: "${l.title}" (${l.courseCode || "General"}, ${l.date})]:\n`;
     if (l.summary || l.studyNotes) contextDetails += `Summary: ${l.summary || l.studyNotes}\n`;
+    if (l.topics && l.topics.length > 0) contextDetails += `Topics: ${l.topics.join(", ")}\n`;
+    if (l.keywords && l.keywords.length > 0) {
+      contextDetails += `Keywords: ${l.keywords.map((k) => k.term).join(", ")}\n`;
+    }
     if (l.segments && l.segments.length > 0) {
       contextDetails += `Transcript:\n`;
       l.segments.slice(0, 60).forEach((s) => {
@@ -1244,6 +1347,17 @@ export async function askMeetMindAI({
         const secs = Math.floor(s.startTime % 60);
         contextDetails += `[${mins}:${secs < 10 ? "0" : ""}${secs}] ${s.speaker}: ${s.text}\n`;
       });
+    }
+    const relQuiz = quizzes.find((q) => q.lectureId === l.id);
+    if (relQuiz && relQuiz.questions.length > 0) {
+      contextDetails += `Generated Quiz Questions: ${relQuiz.questions
+        .slice(0, 5)
+        .map((q) => q.question)
+        .join(" | ")}\n`;
+    }
+    const relCards = flashcards.filter((f) => f.lectureId === l.id).slice(0, 5);
+    if (relCards.length > 0) {
+      contextDetails += `Flashcards: ${relCards.map((c) => `${c.front} -> ${c.back}`).join(" | ")}\n`;
     }
     contextDetails += `\n`;
   }
@@ -1256,6 +1370,13 @@ export async function askMeetMindAI({
   for (const m of meetingsToInclude) {
     contextDetails += `[Meeting: "${m.title}" (${m.date})]:\n`;
     if (m.summary) contextDetails += `Summary: ${m.summary}\n`;
+    if (m.topics && m.topics.length > 0) contextDetails += `Topics: ${m.topics.join(", ")}\n`;
+    if (m.keywords && m.keywords.length > 0) {
+      contextDetails += `Keywords: ${m.keywords.map((k) => k.term).join(", ")}\n`;
+    }
+    if (m.decisions && m.decisions.length > 0) {
+      contextDetails += `Decisions: ${m.decisions.join("; ")}\n`;
+    }
     if (m.segments && m.segments.length > 0) {
       contextDetails += `Transcript:\n`;
       m.segments.slice(0, 60).forEach((s) => {
@@ -1267,23 +1388,34 @@ export async function askMeetMindAI({
     contextDetails += `\n`;
   }
 
-  if (!targetItem && tasks.length > 0) {
+  const relevantTasks = targetItem
+    ? tasks.filter((t) => t.meetingId === targetItem.id || t.lectureId === targetItem.id)
+    : tasks;
+  if (relevantTasks.length > 0) {
     contextDetails += `[Extracted Tasks]:\n`;
-    tasks.slice(0, 15).forEach((t) => {
+    relevantTasks.slice(0, 15).forEach((t) => {
       contextDetails += `- ${t.title} (Owner: ${t.ownerName || "Unassigned"}, Deadline: ${t.deadlineText || t.dueDate || "Deadline not specified."})\n`;
     });
   }
 
+  const isArabicQuestion = /[\u0600-\u06FF]/.test(question);
   const ai = getGeminiClient();
-  if (ai && contextDetails.trim().length > 0) {
+
+  if (ai) {
     try {
-      const strictSystemInstruction = `You are the strict transcript-grounded Q&A assistant for MeetMind AI.
+      const hasWorkspaceContext = contextDetails.trim().length > 0;
+      const systemInstruction = targetItem
+        ? `You are MeetMind AI, a helpful intelligent assistant for meetings, lectures, and learning.
+The user currently has a specific recording selected: "${targetItem.title}".
 Rules:
-1. Answer ONLY using facts explicitly stated in the provided recording transcript(s) and extracted records below.
-2. NEVER invent, guess, or use external facts when asked about a recording.
-3. If the answer cannot be verified directly from the provided transcript(s), respond EXACTLY with: "Not mentioned in this recording."
-4. Cite speaker names and timestamps [MM:SS] when evidence exists.
-5. Respond in the same language as the user's question (unless refusing with "Not mentioned in this recording.").`;
+1. If the user asks what was said, decided, assigned, or covered in this recording, answer accurately using ONLY the provided transcript and extracted records, citing speaker names and timestamps [MM:SS]. If that specific detail was NOT mentioned in the recording, state clearly: "Not mentioned in this recording." (or in Arabic: "غير مذكور في هذا التسجيل.").
+2. If the user asks a general, conceptual, academic, coding, or study question (e.g., explaining a concept, giving examples, solving a problem, writing code, or preparing for an exam), answer it thoroughly and helpfully in the user's language (Arabic, Egyptian Arabic, or English).
+3. Never fabricate quotes or claim something was spoken in the recording if it is not in the transcript.`
+        : `You are MeetMind AI, a super-intelligent, helpful AI assistant capable of answering ANY question across all subjects (science, programming, math, engineering, languages, study tips, exam prep, writing, everyday questions, and more), in addition to analyzing the user's uploaded meetings and lectures.
+Rules:
+1. Answer ANY question the user asks clearly, accurately, and naturally in the same language/dialect they used (Standard Arabic, Egyptian Arabic, English, etc.).
+2. If the user asks about their meetings, lectures, recordings, summaries, tasks, quizzes, or flashcards, ground your answer strictly in the provided workspace context below and cite speaker names and timestamps [MM:SS]. Never invent recording content.
+3. If the user asks a general question unrelated to their recordings, answer it directly and completely — NEVER refuse with "Not mentioned in this recording.".`;
 
       const recentHistory = history
         .slice(-10)
@@ -1291,68 +1423,126 @@ Rules:
         .map((h) => `${h.role === "user" ? "User" : "Assistant"}: ${h.text}`)
         .join("\n\n");
 
-      const prompt = `${contextDetails}\n${recentHistory ? `[History]:\n${recentHistory}\n\n` : ""}[Question]:\n"${question}"`;
+      const promptParts: string[] = [];
+      if (hasWorkspaceContext) {
+        promptParts.push(`[User's Authorized Workspace Recordings & Notes]:\n${contextDetails}`);
+      } else {
+        promptParts.push(
+          `[Workspace Status]: The user currently has no transcribed recordings uploaded.`,
+        );
+      }
+      if (recentHistory) {
+        promptParts.push(`[Conversation History]:\n${recentHistory}`);
+      }
+      promptParts.push(`[User Question]:\n${question}`);
 
-      const response = await ai.models.generateContent({
-        model: "gemini-4-hydrogen",
-        contents: prompt,
-        config: { systemInstruction: strictSystemInstruction },
-      });
+      let response;
+      try {
+        response = await ai.models.generateContent({
+          model: "gemini-3.1-flash-lite",
+          contents: promptParts.join("\n\n"),
+          config: { systemInstruction },
+        });
+      } catch (primaryErr) {
+        const msg = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
+        if (/API_KEY_INVALID|API key not valid|PERMISSION_DENIED|403|401/i.test(msg)) {
+          throw primaryErr;
+        }
+        response = await ai.models.generateContent({
+          model: "gemini-4-hydrogen",
+          contents: promptParts.join("\n\n"),
+          config: {
+            systemInstruction,
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          },
+        });
+      }
 
       const replyText = (response.text || "").trim();
-      const notMentioned =
-        !replyText ||
-        replyText.includes("Not mentioned in this recording") ||
-        replyText.includes("غير مذكور في هذا التسجيل");
+      if (replyText) {
+        const activeSegments =
+          targetSegments.length > 0
+            ? targetSegments
+            : [...(latestLecture?.segments || []), ...(latestMeeting?.segments || [])];
 
-      if (notMentioned) {
-        return {
-          answer: "Not mentioned in this recording.",
+        const grounded =
+          activeSegments.length > 0
+            ? answerGroundedQuestion(question, activeSegments, targetItem?.title || "Recordings")
+            : { citations: [], evidenceFound: false };
+
+        const notMentioned =
+          Boolean(targetItem) &&
+          (replyText === "Not mentioned in this recording." ||
+            replyText === "غير مذكور في هذا التسجيل.");
+
+        const finalAnswer = {
+          answer: replyText,
+          evidenceFound: !notMentioned && (grounded.evidenceFound || !targetItem),
+          citations: grounded.evidenceFound ? grounded.citations : [],
+          suggestedFollowUps: isArabicQuestion
+            ? [
+                "اشرح هذه النقطة بأمثلة عملية أكثر",
+                "لخص الإجابة في نقاط سريعة للمذاكرة",
+                "اعمل لي 5 أسئلة اختبار على الموضوع ده",
+              ]
+            : [
+                "Explain this with practical examples",
+                "Summarize into concise study bullets",
+                "Create 5 practice quiz questions on this topic",
+              ],
+        };
+        persistChatTurn(finalAnswer);
+        return finalAnswer;
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.warn("Gemini query warning:", errMsg);
+      if (
+        !targetItem &&
+        /API_KEY_INVALID|API key not valid|PERMISSION_DENIED|403|401/i.test(errMsg)
+      ) {
+        const cfgAnswer = {
+          answer: isArabicQuestion
+            ? "تعذر الاتصال بمحرك الذكاء الاصطناعي لأن مفتاح GEMINI_API_KEY غير مضبوط أو غير صالح. يرجى التأكد من تفعيل مفتاح Gemini API الصحيح من لوحة Settings > Secrets."
+            : "Unable to reach the AI engine because GEMINI_API_KEY is missing or invalid. Please check your Gemini API key in Settings > Secrets.",
           evidenceFound: false,
           citations: [],
         };
+        persistChatTurn(cfgAnswer);
+        return cfgAnswer;
       }
-
-      const activeSegments =
-        targetSegments.length > 0
-          ? targetSegments
-          : [...(latestLecture?.segments || []), ...(latestMeeting?.segments || [])];
-
-      const grounded = answerGroundedQuestion(
-        question,
-        activeSegments,
-        targetItem?.title || "Recordings",
-      );
-
-      return {
-        answer: replyText,
-        evidenceFound: true,
-        citations: grounded.citations,
-      };
-    } catch (err) {
-      console.warn("Gemini query warning:", err);
     }
   }
 
-  // Deterministic grounded transcript search fallback (never fabricates answers)
+  // Deterministic grounded transcript search when querying a recording or when offline/key unconfigured
   if (targetItem) {
-    return answerGroundedQuestion(question, targetSegments, targetItem.title);
+    const res = answerGroundedQuestion(question, targetSegments, targetItem.title);
+    persistChatTurn(res);
+    return res;
   }
 
   const allActive = [...(latestLecture?.segments || []), ...(latestMeeting?.segments || [])];
   if (allActive.length > 0) {
-    return answerGroundedQuestion(
+    const res = answerGroundedQuestion(
       question,
       allActive,
       latestLecture?.title || latestMeeting?.title || "Recordings",
     );
+    if (res.evidenceFound) {
+      persistChatTurn(res);
+      return res;
+    }
   }
 
-  return {
-    answer: "Not mentioned in this recording.",
+  const unconfiguredMsg = {
+    answer: isArabicQuestion
+      ? "محرك الذكاء الاصطناعي للإجابة على الأسئلة العامة يحتاج إلى مفتاح GEMINI_API_KEY صالح في لوحة Settings > Secrets. بمجرد تفعيل المفتاح، سأتمكن من الإجابة على أي سؤال تطرحه في أي مجال بالإضافة لتحليل تسجيلاتك."
+      : "The general AI assistant requires a valid GEMINI_API_KEY configured in Settings > Secrets. Once configured, I can answer any question across any topic as well as analyze your recordings.",
     evidenceFound: false,
     citations: [],
   };
+  persistChatTurn(unconfiguredMsg);
+  return unconfiguredMsg;
 }
 
 // Generate Spaced Repetition Flashcards Grounded in Transcript
@@ -1361,7 +1551,15 @@ export async function generateAiFlashcards(
   segments: TranscriptSegment[],
   summaryText?: string,
   courseCode?: string,
-): Promise<Array<{ front: string; back: string }>> {
+): Promise<
+  Array<{
+    front: string;
+    back: string;
+    sourceReference?: string;
+    topic?: string;
+    difficulty?: "easy" | "medium" | "hard";
+  }>
+> {
   const detectedLang = detectTranscriptLanguage(title, segments);
   const ai = getGeminiClient();
 
@@ -1379,6 +1577,7 @@ ${langDirective}
 1. الوجه الأمامي (front): سؤال واضح أو مصطلح محوري ورد في الجلسة.
 2. الوجه الخلفي (back): إجابة دقيقة وموجزة مستندة للنص المفرغ فقط.
 3. لا تختلق أي معلومة لم تذكر في النص المفرغ.
+4. أرفق sourceReference (التوقيت أو القسم)، topic (الموضوع)، difficulty ("easy" | "medium" | "hard").
 
 النص المفرغ:
 """
@@ -1394,12 +1593,15 @@ ${summaryText || ""}
 [
   {
     "front": "...",
-    "back": "..."
+    "back": "...",
+    "sourceReference": "01:20",
+    "topic": "...",
+    "difficulty": "medium"
   }
 ]`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-4-hydrogen",
+        model: "gemini-3.1-flash-lite",
         contents: prompt,
         config: { responseMimeType: "application/json" },
       });
@@ -1410,6 +1612,11 @@ ${summaryText || ""}
           .map((item) => ({
             front: String(item.front || "").trim(),
             back: String(item.back || "").trim(),
+            sourceReference: item.sourceReference ? String(item.sourceReference).trim() : "00:00",
+            topic: item.topic ? String(item.topic).trim() : courseCode || title,
+            difficulty: (["easy", "medium", "hard"].includes(item.difficulty)
+              ? item.difficulty
+              : "medium") as "easy" | "medium" | "hard",
           }))
           .filter((c) => c.front && c.back);
       }
@@ -1421,21 +1628,23 @@ ${summaryText || ""}
   // Deterministic Grounded Fallback
   const valid = segments.filter((s) => s.text && s.text.length > 20);
   const pool = valid.length >= 4 ? valid : segments;
-  return pool.slice(0, 6).map((seg) => ({
-    front:
-      detectedLang === "en"
-        ? `What point was covered at [${Math.floor(seg.startTime / 60)}:${Math.floor(
-            seg.startTime % 60,
-          )
-            .toString()
-            .padStart(2, "0")}] in "${title}"?`
-        : `ما هو المفهوم الذي تم تناوله في الجزء [${Math.floor(seg.startTime / 60)}:${Math.floor(
-            seg.startTime % 60,
-          )
-            .toString()
-            .padStart(2, "0")}] من "${title}"؟`,
-    back: seg.text,
-  }));
+  return pool.slice(0, 6).map((seg, idx) => {
+    const ts = `${Math.floor(seg.startTime / 60)
+      .toString()
+      .padStart(2, "0")}:${Math.floor(seg.startTime % 60)
+      .toString()
+      .padStart(2, "0")}`;
+    return {
+      front:
+        detectedLang === "en"
+          ? `What point was covered at [${ts}] in "${title}"?`
+          : `ما هو المفهوم الذي تم تناوله في الجزء [${ts}] من "${title}"؟`,
+      back: seg.text,
+      sourceReference: ts,
+      topic: courseCode || title,
+      difficulty: idx % 3 === 0 ? "easy" : idx % 3 === 1 ? "medium" : "hard",
+    };
+  });
 }
 
 // Generate Hierarchical Knowledge Graph (Mind Map) Grounded in Transcript
@@ -1477,7 +1686,7 @@ ${summaryText || ""}
 المطلوب إرجاع كائن JSON يمثل العقدة الجذرية بالهيكل الموضح.`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-4-hydrogen",
+        model: "gemini-3.1-flash-lite",
         contents: prompt,
         config: { responseMimeType: "application/json" },
       });

@@ -1,10 +1,9 @@
 import fs from "node:fs";
-import path from "node:path";
-import { buildAuthenticLectureRecord } from "./lecture-data";
+import { getDataDir, getDbFilePath, getRecordingsDir } from "./storage";
 
-const DATA_DIR = path.resolve(process.cwd(), "data");
-const DB_FILE = path.join(DATA_DIR, "meetmind_db.json");
-const RECORDINGS_DIR = path.join(DATA_DIR, "recordings");
+const DATA_DIR = getDataDir();
+const DB_FILE = getDbFilePath();
+const RECORDINGS_DIR = getRecordingsDir();
 
 // Ensure data directories exist
 if (!fs.existsSync(DATA_DIR)) {
@@ -19,10 +18,49 @@ export interface UserRecord {
   email: string;
   name: string;
   passwordHash: string;
-  role: "admin" | "member" | "student" | "instructor";
+  role: "admin" | "member" | "student" | "instructor" | "guest";
+  authProvider?: "local" | "google" | "guest";
+  googleSub?: string;
+  emailVerified?: boolean;
+  isGuest?: boolean;
   avatarUrl?: string;
+  avatarFileName?: string;
+  bio?: string;
+  jobTitle?: string;
   department?: string;
+  organization?: string;
+  nameCustomized?: boolean;
+  avatarCustomized?: boolean;
   createdAt: string;
+  updatedAt?: string;
+}
+
+export interface AuthSessionRecord {
+  id: string;
+  userId: string;
+  refreshTokenHash: string;
+  isGuest: boolean;
+  rememberMe: boolean;
+  userAgent?: string;
+  ipAddress?: string;
+  expiresAt: string;
+  revokedAt?: string;
+  createdAt: string;
+  lastUsedAt: string;
+}
+
+export interface PasswordResetTokenRecord {
+  id: string;
+  userId: string;
+  tokenHash: string;
+  expiresAt: string;
+  usedAt?: string;
+  createdAt: string;
+}
+
+export interface RevokedTokenRecord {
+  jti: string;
+  exp: number;
 }
 
 export interface WorkspaceRecord {
@@ -177,6 +215,7 @@ export interface QuizQuestionRecord {
   difficulty?: "easy" | "medium" | "hard";
   sectionRef?: string;
   timestampRef?: string;
+  sourceReference?: string;
 }
 
 export interface QuizAttemptRecord {
@@ -208,10 +247,25 @@ export interface FlashcardRecord {
   deckId: string;
   deckTitle: string;
   lectureId?: string;
+  meetingId?: string;
   front: string;
   back: string;
+  sourceReference?: string;
+  topic?: string;
+  difficulty?: "easy" | "medium" | "hard";
   mastered: boolean;
   reviewCount: number;
+  createdAt: string;
+}
+
+export interface ChatMessageRecord {
+  id: string;
+  userId: string;
+  resourceId?: string;
+  role: "user" | "assistant";
+  content: string;
+  evidenceFound?: boolean;
+  citations?: { speaker: string; timestamp: string; quote: string }[];
   createdAt: string;
 }
 
@@ -300,6 +354,9 @@ export interface AuditRecord {
 
 export interface DatabaseSchema {
   users: UserRecord[];
+  authSessions: AuthSessionRecord[];
+  passwordResetTokens: PasswordResetTokenRecord[];
+  revokedTokens: RevokedTokenRecord[];
   workspaces: WorkspaceRecord[];
   meetings: MeetingRecord[];
   lectures: LectureRecord[];
@@ -308,6 +365,7 @@ export interface DatabaseSchema {
   quizAttempts: QuizAttemptRecord[];
   flashcards: FlashcardRecord[];
   mindMaps: MindMapRecord[];
+  chatMessages: ChatMessageRecord[];
   notifications: NotificationRecord[];
   calendarEvents: CalendarEventRecord[];
   jobs: JobRecord[];
@@ -319,74 +377,30 @@ export interface DatabaseSchema {
 function getInitialData(): DatabaseSchema {
   const now = new Date().toISOString();
   return {
-    users: [
-      {
-        id: "usr_admin",
-        email: "alex.kim@acme.edu",
-        name: "Alex Kim",
-        passwordHash: "hash_admin_123456", // Default dev login
-        role: "admin",
-        department: "Computer Science & Engineering",
-        createdAt: now,
-      },
-      {
-        id: "usr_ava",
-        email: "ava.chen@acme.edu",
-        name: "Ava Chen",
-        passwordHash: "hash_user_123456",
-        role: "member",
-        department: "Product Architecture",
-        createdAt: now,
-      },
-      {
-        id: "usr_marcus",
-        email: "marcus.lee@acme.edu",
-        name: "Marcus Lee",
-        passwordHash: "hash_user_123456",
-        role: "member",
-        department: "Design Systems",
-        createdAt: now,
-      },
-      {
-        id: "usr_priya",
-        email: "priya.patel@acme.edu",
-        name: "Priya Patel",
-        passwordHash: "hash_user_123456",
-        role: "instructor",
-        department: "Distributed Systems",
-        createdAt: now,
-      },
-    ],
+    users: [],
+    authSessions: [],
+    passwordResetTokens: [],
+    revokedTokens: [],
     workspaces: [
       {
         id: "ws_default",
-        name: "Acme University & Labs",
-        slug: "acme-labs",
-        ownerId: "usr_admin",
+        name: "MeetMind AI Workspace",
+        slug: "meetmind-workspace",
+        ownerId: "system",
         plan: "enterprise",
         createdAt: now,
       },
     ],
-    // Clean initial state as explicitly requested by user
+    // Clean initial state with zero pre-baked or fake records
     meetings: [],
-    lectures: [buildAuthenticLectureRecord().lecture],
-    actionItems: buildAuthenticLectureRecord().tasks,
-    quizzes: [buildAuthenticLectureRecord().quiz],
+    lectures: [],
+    actionItems: [],
+    quizzes: [],
     quizAttempts: [],
-    flashcards: buildAuthenticLectureRecord().flashcards,
-    mindMaps: [buildAuthenticLectureRecord().mindMap],
-    notifications: [
-      {
-        id: `notif_authentic_ready`,
-        userId: "usr_admin",
-        title: "اكتمل تفريغ المحاضرة بدقة تامة",
-        body: 'تم تفريغ وتحليل "محاضرة: فقه التسامح وبناء الذات بين الدنيا والآخرة" (23:36) بنجاح 100% واستخراج الكويز والمهام والبطاقات.',
-        targetUrl: "/transcript",
-        read: false,
-        type: "summary",
-        createdAt: now,
-      },
-    ],
+    flashcards: [],
+    mindMaps: [],
+    chatMessages: [],
+    notifications: [],
     calendarEvents: [],
     jobs: [],
     recordingSessions: [],
@@ -411,38 +425,19 @@ class DatabaseManager {
   }
 
   private load(): DatabaseSchema {
-    const authentic = buildAuthenticLectureRecord();
     try {
       if (fs.existsSync(DB_FILE)) {
         const raw = fs.readFileSync(DB_FILE, "utf-8");
         const parsed: DatabaseSchema = JSON.parse(raw);
+        if (!parsed.authSessions) parsed.authSessions = [];
+        if (!parsed.passwordResetTokens) parsed.passwordResetTokens = [];
+        if (!parsed.revokedTokens) parsed.revokedTokens = [];
         if (!parsed.recordingSessions) parsed.recordingSessions = [];
         if (!parsed.quizAttempts) parsed.quizAttempts = [];
         if (!parsed.deletedResourceIds) parsed.deletedResourceIds = [];
         if (!parsed.flashcards) parsed.flashcards = [];
         if (!parsed.mindMaps) parsed.mindMaps = [];
-
-        // Ensure authentic graduation project lecture is present UNLESS explicitly deleted
-        const isDeleted = parsed.deletedResourceIds.includes(authentic.lecture.id);
-        if (!isDeleted && !parsed.lectures.some((l) => l.id === authentic.lecture.id)) {
-          parsed.lectures = [
-            authentic.lecture,
-            ...parsed.lectures.filter((l) => !l.title.includes("نظم التشغيل")),
-          ];
-        }
-        if (!isDeleted && !parsed.quizzes.some((q) => q.lectureId === authentic.lecture.id)) {
-          parsed.quizzes = [authentic.quiz, ...parsed.quizzes];
-        }
-        if (!isDeleted && !parsed.actionItems.some((a) => a.lectureId === authentic.lecture.id)) {
-          parsed.actionItems = [...authentic.tasks, ...parsed.actionItems];
-        }
-        if (!isDeleted && parsed.flashcards.length === 0) {
-          parsed.flashcards = authentic.flashcards;
-        }
-        if (!isDeleted && parsed.mindMaps.length === 0) {
-          parsed.mindMaps = [authentic.mindMap];
-        }
-        this.saveData(parsed);
+        if (!parsed.chatMessages) parsed.chatMessages = [];
         return parsed;
       }
     } catch (err) {

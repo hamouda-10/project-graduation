@@ -36,12 +36,24 @@ export function AIRadar3DCard({ isArabic, className = "" }: AIRadar3DCardProps) 
 
   const totalMeetings = metrics?.totalMeetings ?? 0;
   const totalLectures = metrics?.totalLectures ?? 0;
+  const totalSessions = totalMeetings + totalLectures;
+  const totalTranscripts = metrics?.totalTranscripts ?? 0;
+  const totalQuizzes = metrics?.totalQuizzes ?? 0;
   const completedTasks = metrics?.completedTasks ?? 0;
   const pendingTasks = metrics?.pendingTasks ?? 0;
   const totalTasks = completedTasks + pendingTasks;
   const totalHours = metrics?.totalAudioHours ?? 0;
 
-  const taskRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 94;
+  const taskRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
+  const transcriptionRate =
+    totalSessions > 0 ? Math.min(100, Math.round((totalTranscripts / totalSessions) * 100)) : 0;
+  const studyReadinessRate =
+    totalQuizzes > 0 && totalSessions > 0
+      ? Math.min(
+          100,
+          Math.round((totalQuizzes / Math.max(1, totalLectures || totalSessions)) * 100),
+        )
+      : 0;
   const isProcessing =
     audioSystemMode === "Uploading" ||
     audioSystemMode === "Processing" ||
@@ -58,29 +70,29 @@ export function AIRadar3DCard({ isArabic, className = "" }: AIRadar3DCardProps) 
       route: "/reports" as const,
       cta: isArabic ? "فتح تقارير المهام" : "Open Tasks & Reports",
       metricLeft: isArabic ? `المهام: ${totalTasks}` : `Tasks: ${totalTasks}`,
-      metricRight: isArabic
-        ? `الجلسات: ${totalMeetings + totalLectures}`
-        : `Sessions: ${totalMeetings + totalLectures}`,
+      metricRight: isArabic ? `الجلسات: ${totalSessions}` : `Sessions: ${totalSessions}`,
     },
     analytics: {
-      percent: 99,
-      label: isArabic ? "دقة المحرك" : "ASR Accuracy",
-      subtext: isArabic ? `تم توفير ${totalHours} ساعة عمل` : `${totalHours}h Saved via AI`,
+      percent: isProcessing ? Math.max(12, audioJobProgress) : transcriptionRate,
+      label: isArabic ? "اكتمال التفريغ" : "Processed Rate",
+      subtext: isArabic
+        ? `${totalTranscripts}/${totalSessions} جلسة مفرغة · ${totalHours} ساعة`
+        : `${totalTranscripts}/${totalSessions} Transcribed · ${totalHours}h`,
       route: "/analytics" as const,
       cta: isArabic ? "عرض لوحة التحليلات" : "View Full Analytics",
-      metricLeft: "Whisper INT8",
-      metricRight: `${totalHours}h Saved`,
+      metricLeft: isArabic ? `التفريغات: ${totalTranscripts}` : `Transcripts: ${totalTranscripts}`,
+      metricRight: `${totalHours}h`,
     },
     study: {
-      percent: totalLectures > 0 ? 96 : 92,
-      label: isArabic ? "جاهزية الاختبار" : "Quiz Readiness",
+      percent: studyReadinessRate,
+      label: isArabic ? "جاهزية الاختبار" : "Quiz Coverage",
       subtext: isArabic
-        ? `${totalLectures} محاضرة · ${totalMeetings} اجتماع`
-        : `${totalLectures} Lectures · ${totalMeetings} Meetings`,
+        ? `${totalQuizzes} اختبار · ${totalLectures} محاضرة`
+        : `${totalQuizzes} Quizzes · ${totalLectures} Lectures`,
       route: "/quiz" as const,
-      cta: isArabic ? "بدء اختبار ذكي الآن" : "Generate AI Quiz",
-      metricLeft: isArabic ? `محاضرات: ${totalLectures}` : `Lectures: ${totalLectures}`,
-      metricRight: isArabic ? `اجتماعات: ${totalMeetings}` : `Meetings: ${totalMeetings}`,
+      cta: isArabic ? "بدء اختبار ذكي الآن" : "Open AI Quizzes",
+      metricLeft: isArabic ? `الاختبارات: ${totalQuizzes}` : `Quizzes: ${totalQuizzes}`,
+      metricRight: isArabic ? `المحاضرات: ${totalLectures}` : `Lectures: ${totalLectures}`,
     },
   }[activeTab];
 

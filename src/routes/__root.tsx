@@ -4,6 +4,8 @@ import {
   Link,
   createRootRouteWithContext,
   useRouter,
+  useRouterState,
+  useNavigate,
   HeadContent,
   Scripts,
 } from "@tanstack/react-router";
@@ -12,11 +14,14 @@ import { useEffect, lazy, Suspense, type ReactNode } from "react";
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import { Shell } from "@/components/layout/shell";
+import { Logo } from "@/components/common/logo";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ErrorState } from "@/components/error/error-state";
 import { THEME_STORAGE_KEY, useUIStore } from "@/stores/ui-store";
+import { useAuthStore } from "@/stores/auth-store";
 import { useI18nStore } from "@/lib/i18n";
+import { useDataSync } from "@/lib/use-data-sync";
 
 // Lazy-load heavy dialogs, floating tools and command palette to avoid blocking initial paint
 const UploadRecordingDialog = lazy(() =>
@@ -187,15 +192,47 @@ function RootShell({ children }: { children: ReactNode }) {
   );
 }
 
-import { useDataSync } from "@/lib/use-data-sync";
+const AUTH_PUBLIC_PATHS = ["/login", "/register"];
+const GUEST_RESTRICTED_PREFIXES = ["/admin", "/users"];
+
+function isSafeRedirectTarget(target: string | null): target is string {
+  if (!target) return false;
+  if (!target.startsWith("/") || target.startsWith("//")) return false;
+  return !AUTH_PUBLIC_PATHS.some((p) => target === p || target.startsWith(`${p}?`));
+}
 
 function DataSyncListener() {
   useDataSync();
   return null;
 }
 
+function SessionLoadingScreen({ message }: { message: string }) {
+  return (
+    <div
+      className="flex min-h-screen w-full flex-col items-center justify-center bg-[#060608] px-4 text-zinc-100"
+      role="status"
+      aria-live="polite"
+    >
+      <div className="flex flex-col items-center gap-5">
+        <Logo />
+        <div className="flex items-center gap-2.5 text-xs font-medium tracking-wide text-zinc-400">
+          <span
+            className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-amber-400/30 border-t-amber-400"
+            aria-hidden="true"
+          />
+          <span>{message}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RootComponent() {
   const { queryClient } = Route.useRouteContext();
+  const navigate = useNavigate();
+  const pathname = useRouterState({ select: (r) => r.location.pathname });
+  const searchStr = useRouterState({ select: (r) => r.location.searchStr });
+
   const hydrateTheme = useUIStore((s) => s.hydrateTheme);
   const hydrateUiLanguage = useUIStore((s) => s.hydrateLanguage);
   const resolvedTheme = useUIStore((s) => s.resolvedTheme);
@@ -204,11 +241,21 @@ function RootComponent() {
   const setRecordingDialogOpen = useUIStore((s) => s.setRecordingDialogOpen);
   const hydrateI18nLanguage = useI18nStore((s) => s.hydrateLanguage);
 
+  const authStatus = useAuthStore((s) => s.status);
+  const restoreSession = useAuthStore((s) => s.restoreSession);
+  const handleSessionExpired = useAuthStore((s) => s.handleSessionExpired);
+
+  const isAuthPublicPath = AUTH_PUBLIC_PATHS.includes(pathname);
+  const isGuestRestrictedPath = GUEST_RESTRICTED_PREFIXES.some(
+    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
+  );
+
   useEffect(() => {
     hydrateTheme();
     hydrateUiLanguage();
     hydrateI18nLanguage();
-  }, [hydrateTheme, hydrateUiLanguage, hydrateI18nLanguage]);
+    void restoreSession();
+  }, [hydrateTheme, hydrateUiLanguage, hydrateI18nLanguage, restoreSession]);
 
   useEffect(() => {
     if (typeof document !== "undefined") {
@@ -216,6 +263,91 @@ function RootComponent() {
       document.documentElement.lang = language === "AR" ? "ar" : "en";
     }
   }, [language]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onSessionExpired = (event: Event) => {
+      const detail = (event as CustomEvent<{ message?: string }>).detail;
+      queryClient.clear();
+      handleSessionExpired(detail?.message);
+    };
+    window.addEventListener("meetmind:session-expired", onSessionExpired);
+    return () => {
+      window.removeEventListener("meetmind:session-expired", onSessionExpired);
+    };
+  }, [handleSessionExpired, queryClient]);
+
+  useEffect(() => {
+    if (authStatus === "loading") return;
+
+    if (isAuthPublicPath) {
+      // Redirect fully authenticated (non-guest) users away from /login and /register
+      if (authStatus === "authenticated") {
+        const params = new URLSearchParams(searchStr || "");
+        const redirectTarget = params.get("redirect");
+        const destination = isSafeRedirectTarget(redirectTarget) ? redirectTarget : "/";
+        void navigate({ to: destination as never, replace: true });
+      }
+      return;
+    }
+
+    if (authStatus === "unauthenticated" || authStatus === "session_expired") {
+      const currentFullPath = `${pathname}${searchStr || ""}`;
+      const redirectParam =
+        currentFullPath && currentFullPath !== "/" && !AUTH_PUBLIC_PATHS.includes(pathname)
+          ? `?redirect=${encodeURIComponent(currentFullPath)}`
+          : "";
+      void navigate({ to: `/login${redirectParam}` as never, replace: true });
+      return;
+    }
+
+    if (authStatus === "guest" && isGuestRestrictedPath) {
+      void navigate({ to: "/403" as never, replace: true });
+    }
+  }, [authStatus, isAuthPublicPath, isGuestRestrictedPath, pathname, searchStr, navigate]);
+
+  const loadingText = language === "AR" ? "جارٍ التحقق من الجلسة..." : "Restoring session...";
+
+  // Public authentication routes (/login, /register)
+  if (isAuthPublicPath) {
+    return (
+      <QueryClientProvider client={queryClient}>
+        <TooltipProvider delayDuration={200}>
+          {authStatus === "loading" || authStatus === "authenticated" ? (
+            <SessionLoadingScreen message={loadingText} />
+          ) : (
+            <Outlet />
+          )}
+          <Toaster position="top-right" richColors theme={resolvedTheme} />
+        </TooltipProvider>
+      </QueryClientProvider>
+    );
+  }
+
+  // Protected application routes: zero-flicker guard before session verification completes
+  if (
+    authStatus === "loading" ||
+    authStatus === "unauthenticated" ||
+    authStatus === "session_expired" ||
+    (authStatus === "guest" && isGuestRestrictedPath)
+  ) {
+    return (
+      <QueryClientProvider client={queryClient}>
+        <TooltipProvider delayDuration={200}>
+          <SessionLoadingScreen
+            message={
+              authStatus === "loading"
+                ? loadingText
+                : language === "AR"
+                  ? "جارٍ التوجيه إلى صفحة تسجيل الدخول..."
+                  : "Redirecting to sign in..."
+            }
+          />
+          <Toaster position="top-right" richColors theme={resolvedTheme} />
+        </TooltipProvider>
+      </QueryClientProvider>
+    );
+  }
 
   return (
     <QueryClientProvider client={queryClient}>

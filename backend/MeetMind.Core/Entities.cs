@@ -11,8 +11,16 @@ namespace MeetMind.Core.Entities
         public string Name { get; set; } = string.Empty;
         public string PasswordHash { get; set; } = string.Empty;
         public UserRole Role { get; set; } = UserRole.Member;
+        public string? AvatarUrl { get; set; }
+        public string? AvatarFileName { get; set; }
+        public string? Bio { get; set; }
+        public string? JobTitle { get; set; }
         public string? Department { get; set; }
+        public string? Organization { get; set; }
+        public bool NameCustomized { get; set; } = false;
+        public bool AvatarCustomized { get; set; } = false;
         public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+        public DateTime UpdatedAtUtc { get; set; } = DateTime.UtcNow;
 
         public ICollection<WorkspaceMembership> Memberships { get; set; } = new List<WorkspaceMembership>();
     }
@@ -218,6 +226,7 @@ namespace MeetMind.Core.Entities
         public string Explanation { get; set; } = string.Empty;
         public string Difficulty { get; set; } = "medium";
         public string? SourceTimestamp { get; set; }
+        public string? SourceReference { get; set; }
     }
 
     public class QuizAttempt
@@ -244,8 +253,23 @@ namespace MeetMind.Core.Entities
         public string Front { get; set; } = string.Empty;
         public string Back { get; set; } = string.Empty;
         public string? TimestampRef { get; set; }
+        public string? Topic { get; set; }
+        public string Difficulty { get; set; } = "medium";
         public bool Mastered { get; set; } = false;
         public int ReviewCount { get; set; } = 0;
+        public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+    }
+
+    public class ChatMessage
+    {
+        public Guid Id { get; set; } = Guid.NewGuid();
+        public Guid UserId { get; set; }
+        public Guid? MeetingId { get; set; }
+        public Guid? LectureId { get; set; }
+        public string Role { get; set; } = "user";
+        public string Content { get; set; } = string.Empty;
+        public bool EvidenceFound { get; set; } = false;
+        public string? CitationsJson { get; set; }
         public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
     }
 

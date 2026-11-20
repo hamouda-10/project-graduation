@@ -24,36 +24,21 @@ const tooltipStyle = {
   boxShadow: "var(--shadow-elegant)",
 };
 
-const DEFAULT_WEEKLY = [
-  { day: "Mon", meetings: 4, lectures: 2 },
-  { day: "Tue", meetings: 6, lectures: 3 },
-  { day: "Wed", meetings: 5, lectures: 4 },
-  { day: "Thu", meetings: 8, lectures: 3 },
-  { day: "Fri", meetings: 7, lectures: 5 },
-  { day: "Sat", meetings: 2, lectures: 1 },
-  { day: "Sun", meetings: 1, lectures: 0 },
+const EMPTY_WEEKLY = [
+  { day: "Mon", meetings: 0, lectures: 0 },
+  { day: "Tue", meetings: 0, lectures: 0 },
+  { day: "Wed", meetings: 0, lectures: 0 },
+  { day: "Thu", meetings: 0, lectures: 0 },
+  { day: "Fri", meetings: 0, lectures: 0 },
+  { day: "Sat", meetings: 0, lectures: 0 },
+  { day: "Sun", meetings: 0, lectures: 0 },
 ];
 
-const DEFAULT_MEETING_TREND = [
-  { m: "W1", value: 24 },
-  { m: "W2", value: 32 },
-  { m: "W3", value: 28 },
-  { m: "W4", value: 41 },
-  { m: "W5", value: 46 },
-  { m: "W6", value: 52 },
-  { m: "W7", value: 49 },
-  { m: "W8", value: 58 },
-];
-
-const DEFAULT_LECTURE_TREND = [
-  { m: "W1", value: 10 },
-  { m: "W2", value: 14 },
-  { m: "W3", value: 18 },
-  { m: "W4", value: 16 },
-  { m: "W5", value: 22 },
-  { m: "W6", value: 28 },
-  { m: "W7", value: 26 },
-  { m: "W8", value: 33 },
+const EMPTY_TREND = [
+  { m: "W1", value: 0 },
+  { m: "W2", value: 0 },
+  { m: "W3", value: 0 },
+  { m: "W4", value: 0 },
 ];
 
 export function WeeklyAnalytics() {
@@ -62,7 +47,7 @@ export function WeeklyAnalytics() {
     queryFn: () => api.getDashboardTrends(),
   });
 
-  const weeklyData = trends?.weekly || DEFAULT_WEEKLY;
+  const weeklyData = trends?.weekly || EMPTY_WEEKLY;
 
   return (
     <GlassCard className="p-5">
@@ -79,6 +64,7 @@ export function WeeklyAnalytics() {
               axisLine={false}
             />
             <YAxis
+              allowDecimals={false}
               stroke="var(--color-muted-foreground)"
               fontSize={11}
               tickLine={false}
@@ -104,11 +90,11 @@ export function MeetingAnalytics() {
     queryFn: () => api.getDashboardTrends(),
   });
 
-  const trendData = trends?.meetingTrend || DEFAULT_MEETING_TREND;
+  const trendData = trends?.meetingTrend || EMPTY_TREND;
 
   return (
     <GlassCard className="p-5">
-      <SectionHeader title="Meeting trend" description="Last 8 weeks" />
+      <SectionHeader title="Meeting trend" description="Recent recording cadence" />
       <div className="h-48 w-full">
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={trendData}>
@@ -127,6 +113,7 @@ export function MeetingAnalytics() {
               axisLine={false}
             />
             <YAxis
+              allowDecimals={false}
               stroke="var(--color-muted-foreground)"
               fontSize={11}
               tickLine={false}
@@ -149,12 +136,19 @@ export function MeetingAnalytics() {
 }
 
 export function LectureAnalytics() {
+  const { data: trends } = useQuery<DashboardTrends>({
+    queryKey: ["dashboard-trends"],
+    queryFn: () => api.getDashboardTrends(),
+  });
+
+  const lectureTrendData = trends?.lectureTrend || EMPTY_TREND;
+
   return (
     <GlassCard className="p-5">
-      <SectionHeader title="Lecture trend" description="Last 8 weeks" />
+      <SectionHeader title="Lecture trend" description="Recent academic cadence" />
       <div className="h-48 w-full">
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={DEFAULT_LECTURE_TREND}>
+          <LineChart data={lectureTrendData}>
             <CartesianGrid vertical={false} stroke="var(--color-border)" strokeDasharray="3 3" />
             <XAxis
               dataKey="m"
@@ -164,6 +158,7 @@ export function LectureAnalytics() {
               axisLine={false}
             />
             <YAxis
+              allowDecimals={false}
               stroke="var(--color-muted-foreground)"
               fontSize={11}
               tickLine={false}

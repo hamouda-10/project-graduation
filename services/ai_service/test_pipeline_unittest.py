@@ -47,6 +47,15 @@ class TestMeetMindAiPipeline(unittest.TestCase):
             validate_file_descriptor("notes.pdf", 1024, "application/pdf")
         self.assertIn("Unsupported audio format", ctx2.exception.message)
 
+    def test_unfamiliar_extension_with_real_audio_is_accepted(self):
+        validate_file_descriptor("voice_memo.aud", 4096, "application/octet-stream")
+        wav_path = self._make_wav("voice_memo.wav", 2.0)
+        aud_path = os.path.join(self.tmpdir, "voice_memo.aud")
+        os.rename(wav_path, aud_path)
+        meta = probe_media_file(aud_path)
+        self.assertTrue(meta.has_audio)
+        self.assertGreaterEqual(meta.duration_seconds, 1.5)
+
     def test_probe_rejects_corrupted_file(self):
         corrupted = os.path.join(self.tmpdir, "broken.mp3")
         with open(corrupted, "wb") as f:

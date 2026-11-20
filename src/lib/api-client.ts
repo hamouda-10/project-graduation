@@ -123,6 +123,7 @@ export interface QuizQuestion {
   difficulty?: "easy" | "medium" | "hard";
   sectionRef?: string;
   timestampRef?: string;
+  sourceReference?: string;
 }
 
 export interface QuizAttempt {
@@ -153,8 +154,12 @@ export interface Flashcard {
   deckId: string;
   deckTitle: string;
   lectureId?: string;
+  meetingId?: string;
   front: string;
   back: string;
+  sourceReference?: string;
+  topic?: string;
+  difficulty?: "easy" | "medium" | "hard";
   mastered: boolean;
   reviewCount: number;
 }
@@ -224,6 +229,7 @@ export interface Job {
 export interface DashboardTrends {
   weekly: { day: string; meetings: number; lectures: number }[];
   meetingTrend: { m: string; value: number }[];
+  lectureTrend?: { m: string; value: number }[];
 }
 
 export interface GroundedAnswer {
@@ -231,6 +237,154 @@ export interface GroundedAnswer {
   evidenceFound?: boolean;
   citations: { speaker: string; timestamp: string; quote: string }[];
   suggestedFollowUps?: string[];
+}
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  name: string;
+  role: "admin" | "member" | "student" | "instructor" | "guest" | string;
+  authProvider?: "local" | "google" | "guest";
+  emailVerified?: boolean;
+  hasPassword?: boolean;
+  isGuest?: boolean;
+  avatarUrl?: string;
+  bio?: string;
+  jobTitle?: string;
+  department?: string;
+  organization?: string;
+  initials: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface ProfileRecordingItem {
+  id: string;
+  title: string;
+  type: "meeting" | "lecture";
+  courseCode?: string;
+  date: string;
+  durationSeconds: number;
+  status: string;
+  audioAvailable: boolean;
+  audioStatus: "ready" | "missing";
+  transcriptionStatus: "completed" | "processing" | "failed" | "none";
+  segmentsCount: number;
+  aiStatus: "completed" | "processing" | "failed" | "queued";
+  hasSummary: boolean;
+  hasQuiz: boolean;
+  quizCount: number;
+  tasksCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProfileOverview {
+  user: AuthUser;
+  profileCompletion: {
+    percent: number;
+    completedCount: number;
+    totalCount: number;
+    missingFields: string[];
+  };
+  analytics: {
+    totalMeetings: number;
+    totalLectures: number;
+    totalRecordings: number;
+    totalAudioDurationSeconds: number;
+    totalAudioHours: number;
+    totalTranscriptions: number;
+    totalTranscriptSegments: number;
+    totalSummaries: number;
+    totalQuizzes: number;
+    totalQuizAttempts: number;
+    averageQuizScore: number;
+    totalFlashcards: number;
+    masteredFlashcards: number;
+    totalMindMaps: number;
+    totalChatMessages: number;
+    totalAiOutputs: number;
+    completedJobs: number;
+    pendingJobs: number;
+    failedJobs: number;
+    tasksGenerated: number;
+    tasksCompleted: number;
+    tasksPending: number;
+    taskCompletionRate: number;
+    studySessions: number;
+    mostActiveDays: Array<{ day: string; count: number }>;
+    mostUsedAiFeatures: Array<{ feature: string; key: string; count: number }>;
+    milestones: Array<{
+      id: string;
+      title: string;
+      description: string;
+      unlocked: boolean;
+      current: number;
+      target: number;
+    }>;
+  };
+  recordings: ProfileRecordingItem[];
+  recentMeetings: Array<{
+    id: string;
+    title: string;
+    date: string;
+    durationSeconds: number;
+    status: string;
+    hasSummary: boolean;
+    segmentsCount: number;
+  }>;
+  recentLectures: Array<{
+    id: string;
+    title: string;
+    courseCode: string;
+    date: string;
+    durationSeconds: number;
+    status: string;
+    hasSummary: boolean;
+    segmentsCount: number;
+  }>;
+  recentJobs: Array<{
+    id: string;
+    resourceId: string;
+    resourceType: "meeting" | "lecture";
+    fileName: string;
+    status: string;
+    progressPercent: number;
+    errorMessage?: string;
+    createdAt: string;
+    updatedAt: string;
+  }>;
+  recentQuizAttempts: Array<{
+    id: string;
+    quizId: string;
+    quizTitle: string;
+    scorePercent: number;
+    correctCount: number;
+    totalQuestions: number;
+    submittedAt: string;
+  }>;
+  sessions: Array<{
+    id: string;
+    isCurrent: boolean;
+    isGuest: boolean;
+    rememberMe: boolean;
+    deviceLabel: string;
+    createdAt: string;
+    lastUsedAt: string;
+    expiresAt: string;
+  }>;
+}
+
+export interface AuthSessionResponse {
+  token: string;
+  expiresAt?: string;
+  rememberMe?: boolean;
+  user: AuthUser;
+}
+
+export interface AuthConfigResponse {
+  googleEnabled: boolean;
+  googleClientId: string | null;
 }
 
 function sanitizeAsciiHeaderValue(value: string): string {
@@ -249,17 +403,45 @@ function createAsciiRequestId(): string {
   return `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function resolveApiEndpoint(endpoint: string): string {
+  if (/^https?:\/\//i.test(endpoint)) return endpoint;
+  const rawBase =
+    typeof import.meta !== "undefined" && import.meta.env?.VITE_API_URL
+      ? String(import.meta.env.VITE_API_URL)
+          .trim()
+          .replace(/\/+$/, "")
+      : "";
+  if (!rawBase) return endpoint;
+
+  // Guard: never let a dev localhost VITE_API_URL leak into a non-localhost production browser
+  if (typeof window !== "undefined") {
+    const pageHost = window.location.hostname;
+    const isPageLocal = pageHost === "localhost" || pageHost === "127.0.0.1";
+    const isBaseLocal = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(rawBase);
+    if (!isPageLocal && isBaseLocal) {
+      return endpoint;
+    }
+  }
+
+  if (rawBase.endsWith("/api/v1") && endpoint.startsWith("/api/v1")) {
+    return `${rawBase}${endpoint.slice("/api/v1".length)}`;
+  }
+  return `${rawBase}${endpoint.startsWith("/") ? endpoint : `/${endpoint}`}`;
+}
+
 class ApiClient {
+  private refreshPromise: Promise<boolean> | null = null;
+
   private buildHeaders(
     extra?: HeadersInit,
-    options?: { isFormData?: boolean },
+    options?: { isFormData?: boolean; isBinary?: boolean },
   ): Record<string, string> {
     const headers: Record<string, string> = {
       Accept: "application/json",
       "X-Request-ID": createAsciiRequestId(),
     };
 
-    if (!options?.isFormData) {
+    if (!options?.isFormData && !options?.isBinary) {
       headers["Content-Type"] = "application/json";
     }
 
@@ -298,25 +480,75 @@ class ApiClient {
     return headers;
   }
 
+  private async tryRefreshSession(): Promise<boolean> {
+    if (this.refreshPromise) return this.refreshPromise;
+
+    this.refreshPromise = (async () => {
+      try {
+        const res = await fetch(resolveApiEndpoint("/api/v1/auth/refresh"), {
+          method: "POST",
+          credentials: "include",
+          headers: { Accept: "application/json", "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        });
+        if (!res.ok) return false;
+        const data = (await res.json()) as AuthSessionResponse;
+        if (data?.token && typeof window !== "undefined") {
+          try {
+            const useLocal = Boolean(localStorage.getItem("meetmind_token")) && !data.user?.isGuest;
+            localStorage.removeItem("meetmind_token");
+            sessionStorage.removeItem("meetmind_token");
+            if (useLocal) {
+              localStorage.setItem("meetmind_token", data.token);
+            } else {
+              sessionStorage.setItem("meetmind_token", data.token);
+            }
+          } catch {
+            // ignore storage errors
+          }
+        }
+        return Boolean(data?.token);
+      } catch {
+        return false;
+      } finally {
+        this.refreshPromise = null;
+      }
+    })();
+
+    return this.refreshPromise;
+  }
+
   private async request<T>(
     endpoint: string,
-    options: RequestInit & { timeoutMs?: number; retries?: number } = {},
+    options: RequestInit & {
+      timeoutMs?: number;
+      retries?: number;
+      skipAuthRefresh?: boolean;
+    } = {},
   ): Promise<T> {
     const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
+    const isBinary =
+      (typeof Blob !== "undefined" && options.body instanceof Blob) ||
+      options.body instanceof ArrayBuffer ||
+      ArrayBuffer.isView(options.body);
     const timeoutMs = options.timeoutMs ?? 60000;
     const method = (options.method || "GET").toUpperCase();
     const maxRetries = options.retries ?? (method === "GET" ? 1 : 0);
+    const resolvedUrl = resolveApiEndpoint(endpoint);
+    const isAuthEndpoint = endpoint.startsWith("/api/v1/auth/");
 
     let lastError: Error | null = null;
+    let refreshedOnce = false;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       const controller = new AbortController();
       const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
 
       try {
-        const res = await fetch(endpoint, {
+        const res = await fetch(resolvedUrl, {
           ...options,
-          headers: this.buildHeaders(options.headers, { isFormData }),
+          credentials: "include",
+          headers: this.buildHeaders(options.headers, { isFormData, isBinary }),
           signal: options.signal || controller.signal,
         });
 
@@ -324,20 +556,52 @@ class ApiClient {
 
         if (!res.ok) {
           let msg = `HTTP error ${res.status}`;
+          let code: string | undefined;
           try {
             const errorJson = await res.json();
             if (errorJson?.error) msg = errorJson.error;
             else if (errorJson?.detail) msg = errorJson.detail;
+            if (errorJson?.code) code = String(errorJson.code);
           } catch {
             // ignore parse errors
           }
-          throw new Error(msg);
+
+          if (res.status === 401 && !isAuthEndpoint && !options.skipAuthRefresh) {
+            if (!refreshedOnce && code !== "SESSION_REVOKED") {
+              refreshedOnce = true;
+              const renewed = await this.tryRefreshSession();
+              if (renewed) {
+                attempt--;
+                continue;
+              }
+            }
+            if (typeof window !== "undefined") {
+              window.dispatchEvent(
+                new CustomEvent("meetmind:session-expired", {
+                  detail: { message: msg, code },
+                }),
+              );
+            }
+          }
+
+          const err = new Error(msg) as Error & { status?: number; code?: string };
+          err.status = res.status;
+          err.code = code;
+          // Do not retry 4xx client/auth errors
+          if (res.status >= 400 && res.status < 500) {
+            throw err;
+          }
+          throw err;
         }
 
         return (await res.json()) as Promise<T>;
       } catch (err) {
         clearTimeout(timeoutHandle);
-        lastError = err instanceof Error ? err : new Error("Network request failed");
+        const typedErr = err as Error & { status?: number };
+        lastError = typedErr instanceof Error ? typedErr : new Error("Network request failed");
+        if (typedErr?.status && typedErr.status >= 400 && typedErr.status < 500) {
+          throw lastError;
+        }
         if (attempt < maxRetries) {
           await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
           continue;
@@ -346,6 +610,186 @@ class ApiClient {
     }
 
     throw lastError || new Error("Request failed");
+  }
+
+  // Authentication
+  async getAuthConfig(): Promise<AuthConfigResponse> {
+    return this.request<AuthConfigResponse>("/api/v1/auth/config", {
+      retries: 0,
+      skipAuthRefresh: true,
+    });
+  }
+
+  async authMe(): Promise<AuthUser> {
+    return this.request<AuthUser>("/api/v1/auth/me", {
+      retries: 0,
+      skipAuthRefresh: true,
+    });
+  }
+
+  async authLogin(payload: {
+    email: string;
+    password: string;
+    rememberMe?: boolean;
+  }): Promise<AuthSessionResponse> {
+    return this.request<AuthSessionResponse>("/api/v1/auth/login", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      retries: 0,
+      skipAuthRefresh: true,
+    });
+  }
+
+  async authRegister(payload: {
+    name: string;
+    email: string;
+    password: string;
+    confirmPassword?: string;
+    department?: string;
+  }): Promise<AuthSessionResponse> {
+    return this.request<AuthSessionResponse>("/api/v1/auth/register", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      retries: 0,
+      skipAuthRefresh: true,
+    });
+  }
+
+  async authGoogle(payload: {
+    idToken?: string;
+    accessToken?: string;
+  }): Promise<AuthSessionResponse> {
+    return this.request<AuthSessionResponse>("/api/v1/auth/google", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      retries: 0,
+      skipAuthRefresh: true,
+    });
+  }
+
+  async authGuest(): Promise<AuthSessionResponse> {
+    return this.request<AuthSessionResponse>("/api/v1/auth/guest", {
+      method: "POST",
+      body: JSON.stringify({}),
+      retries: 0,
+      skipAuthRefresh: true,
+    });
+  }
+
+  async authRefresh(): Promise<AuthSessionResponse> {
+    return this.request<AuthSessionResponse>("/api/v1/auth/refresh", {
+      method: "POST",
+      body: JSON.stringify({}),
+      retries: 0,
+      skipAuthRefresh: true,
+    });
+  }
+
+  async authLogout(): Promise<{ success: boolean }> {
+    return this.request<{ success: boolean }>("/api/v1/auth/logout", {
+      method: "POST",
+      body: JSON.stringify({}),
+      retries: 0,
+      skipAuthRefresh: true,
+    });
+  }
+
+  // Profile, Avatar, Sessions & Personal Data Export
+  async getProfile(): Promise<ProfileOverview> {
+    return this.request<ProfileOverview>("/api/v1/profile", { retries: 0 });
+  }
+
+  async updateProfile(payload: {
+    name?: string;
+    bio?: string;
+    jobTitle?: string;
+    department?: string;
+    organization?: string;
+  }): Promise<{ success: boolean; user: AuthUser; profile: ProfileOverview }> {
+    return this.request<{ success: boolean; user: AuthUser; profile: ProfileOverview }>(
+      "/api/v1/profile",
+      {
+        method: "PUT",
+        body: JSON.stringify(payload),
+        retries: 0,
+      },
+    );
+  }
+
+  async uploadProfileAvatar(
+    file: File,
+  ): Promise<{ success: boolean; avatarUrl: string; user: AuthUser }> {
+    const formData = new FormData();
+    formData.append("avatar", file);
+    return this.request<{ success: boolean; avatarUrl: string; user: AuthUser }>(
+      "/api/v1/profile/avatar",
+      {
+        method: "POST",
+        body: formData,
+        retries: 0,
+        timeoutMs: 60000,
+      },
+    );
+  }
+
+  async removeProfileAvatar(): Promise<{ success: boolean; user: AuthUser }> {
+    return this.request<{ success: boolean; user: AuthUser }>("/api/v1/profile/avatar", {
+      method: "DELETE",
+      retries: 0,
+    });
+  }
+
+  async fetchAuthenticatedImageBlob(url: string, signal?: AbortSignal): Promise<Blob> {
+    const resolvedUrl = resolveApiEndpoint(url);
+    const res = await fetch(resolvedUrl, {
+      method: "GET",
+      credentials: "include",
+      headers: this.buildHeaders({ Accept: "image/*" }, { isFormData: true }),
+      signal,
+    });
+    if (!res.ok) {
+      throw new Error(`Image request failed (${res.status})`);
+    }
+    return res.blob();
+  }
+
+  async changePassword(payload: {
+    currentPassword?: string;
+    newPassword: string;
+    confirmPassword: string;
+  }): Promise<{ success: boolean; message: string }> {
+    return this.request<{ success: boolean; message: string }>("/api/v1/profile/password", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      retries: 0,
+    });
+  }
+
+  async revokeSession(sessionId: string): Promise<{ success: boolean }> {
+    return this.request<{ success: boolean }>(
+      `/api/v1/profile/sessions/${encodeURIComponent(sessionId)}`,
+      {
+        method: "DELETE",
+        retries: 0,
+      },
+    );
+  }
+
+  async revokeOtherSessions(): Promise<{ success: boolean; revokedCount: number }> {
+    return this.request<{ success: boolean; revokedCount: number }>(
+      "/api/v1/profile/sessions/revoke-others",
+      {
+        method: "POST",
+        body: JSON.stringify({}),
+        retries: 0,
+      },
+    );
+  }
+
+  async exportMyData(): Promise<Record<string, unknown>> {
+    return this.request<Record<string, unknown>>("/api/v1/profile/export", {
+      retries: 0,
+    });
   }
 
   // Dashboard
@@ -452,6 +896,68 @@ class ApiClient {
       headers: extraHeaders,
       body: formData,
       timeoutMs: 300000,
+    });
+  }
+
+  async initChunkedUpload(
+    payload: {
+      type: "meeting" | "lecture";
+      title: string;
+      courseCode?: string;
+      language?: string;
+      fileName: string;
+      fileSize: number;
+      idempotencyKey?: string;
+    },
+    idempotencyKey?: string,
+  ): Promise<{
+    uploadId?: string;
+    deduplicated?: boolean;
+    jobId?: string;
+    resourceId?: string;
+    resourceType?: string;
+  }> {
+    const extraHeaders: Record<string, string> = {};
+    if (idempotencyKey) {
+      const safeKey = sanitizeAsciiHeaderValue(idempotencyKey);
+      if (safeKey) extraHeaders["Idempotency-Key"] = safeKey;
+    }
+    return this.request("/api/v1/recordings/upload/init", {
+      method: "POST",
+      headers: extraHeaders,
+      body: JSON.stringify(payload),
+      timeoutMs: 30000,
+    });
+  }
+
+  async uploadChunk(
+    uploadId: string,
+    index: number,
+    chunk: Blob,
+  ): Promise<{ uploadId: string; receivedBytes: number; expectedSize: number }> {
+    return this.request(
+      `/api/v1/recordings/upload/chunk?uploadId=${encodeURIComponent(uploadId)}&index=${index}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: chunk,
+        timeoutMs: 120000,
+      },
+    );
+  }
+
+  async completeChunkedUpload(uploadId: string): Promise<{
+    message: string;
+    jobId: string;
+    resourceId: string;
+    resourceType: string;
+    durationSeconds?: number;
+    repaired?: boolean;
+  }> {
+    return this.request("/api/v1/recordings/upload/complete", {
+      method: "POST",
+      body: JSON.stringify({ uploadId }),
+      timeoutMs: 180000,
     });
   }
 

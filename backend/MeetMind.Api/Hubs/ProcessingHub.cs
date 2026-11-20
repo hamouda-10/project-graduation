@@ -1,6 +1,9 @@
 using System;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.EntityFrameworkCore;
+using MeetMind.Api.Services;
+using MeetMind.Infrastructure.Data;
 
 namespace MeetMind.Api.Hubs
 {
@@ -24,28 +27,64 @@ namespace MeetMind.Api.Hubs
 
     public class ProcessingHub : Hub<IProcessingClient>
     {
+        private readonly ICurrentUserService _currentUser;
+        private readonly ApplicationDbContext _db;
+
+        public ProcessingHub(ICurrentUserService currentUser, ApplicationDbContext db)
+        {
+            _currentUser = currentUser;
+            _db = db;
+        }
+
+        public override async Task OnConnectedAsync()
+        {
+            await Groups.AddToGroupAsync(Context.ConnectionId, $"User_{_currentUser.UserId}");
+            await base.OnConnectedAsync();
+        }
+
         public async Task JoinJobGroup(string jobId)
         {
-            if (!string.IsNullOrWhiteSpace(jobId))
+            if (!Guid.TryParse(jobId, out var parsedJobId))
             {
-                await Groups.AddToGroupAsync(Context.ConnectionId, $"Job_{jobId}");
+                return;
             }
+
+            var job = await _db.ProcessingJobs
+                .AsNoTracking()
+                .FirstOrDefaultAsync(j => j.Id == parsedJobId);
+
+            if (job == null)
+            {
+                return;
+            }
+
+            if (!_currentUser.IsAdmin && job.UserId != _currentUser.UserId)
+            {
+                throw new HubException("Unauthorized to subscribe to this processing job.");
+            }
+
+            await Groups.AddToGroupAsync(Context.ConnectionId, $"Job_{parsedJobId}");
         }
 
         public async Task LeaveJobGroup(string jobId)
         {
-            if (!string.IsNullOrWhiteSpace(jobId))
+            if (Guid.TryParse(jobId, out var parsedJobId))
             {
-                await Groups.RemoveFromGroupAsync(Context.ConnectionId, $"Job_{jobId}");
+                await Groups.RemoveFromGroupAsync(Context.ConnectionId, $"Job_{parsedJobId}");
             }
         }
 
         public async Task JoinUserGroup(string userId)
         {
-            if (!string.IsNullOrWhiteSpace(userId))
+            // Never trust arbitrary client-provided userId; always bind to authenticated user unless Admin
+            if (Guid.TryParse(userId, out var requestedUserId) &&
+                (_currentUser.IsAdmin || requestedUserId == _currentUser.UserId))
             {
-                await Groups.AddToGroupAsync(Context.ConnectionId, $"User_{userId}");
+                await Groups.AddToGroupAsync(Context.ConnectionId, $"User_{requestedUserId}");
+                return;
             }
+
+            await Groups.AddToGroupAsync(Context.ConnectionId, $"User_{_currentUser.UserId}");
         }
     }
 }

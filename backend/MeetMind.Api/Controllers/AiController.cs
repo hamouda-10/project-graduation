@@ -49,7 +49,20 @@ namespace MeetMind.Api.Controllers
             _hub = hub;
         }
 
-        private bool IsAdmin => !_currentUser.IsAuthenticated || _currentUser.IsAdmin;
+        private bool IsAdmin => _currentUser.IsAdmin;
+
+        [HttpGet("chat-history")]
+        public async Task<IActionResult> GetChatHistory([FromQuery] Guid? resourceId, CancellationToken ct)
+        {
+            var query = _db.ChatMessages.AsNoTracking().Where(c => IsAdmin || c.UserId == _currentUser.UserId);
+            if (resourceId.HasValue)
+            {
+                query = query.Where(c => c.MeetingId == resourceId.Value || c.LectureId == resourceId.Value);
+            }
+            var messages = await query.OrderByDescending(c => c.CreatedAtUtc).Take(50).ToListAsync(ct);
+            messages.Reverse();
+            return Ok(messages);
+        }
 
         [HttpPost("ask")]
         public async Task<IActionResult> Ask([FromBody] AiAskRequest request, CancellationToken ct)
@@ -65,11 +78,18 @@ namespace MeetMind.Api.Controllers
                 var (title, _, _, segments) = await LoadResourceAsync(request.ResourceId.Value, ct);
                 if (title == null)
                 {
-                    return NotFound(new { error = "Recording not found." });
+                    var existsElsewhere =
+                        await _db.Meetings.AnyAsync(m => m.Id == request.ResourceId.Value, ct) ||
+                        await _db.Lectures.AnyAsync(l => l.Id == request.ResourceId.Value, ct);
+                    return existsElsewhere
+                        ? StatusCode(403, new { error = "You do not have permission to query this recording." })
+                        : NotFound(new { error = "Recording not found." });
                 }
 
+                var isMeeting = await _db.Meetings.AnyAsync(m => m.Id == request.ResourceId.Value, ct);
                 if (segments.Count == 0)
                 {
+                    await SaveChatTurnAsync(question, "Not mentioned in this recording.", false, Array.Empty<object>(), isMeeting ? request.ResourceId : null, isMeeting ? null : request.ResourceId, ct);
                     return Ok(new
                     {
                         answer = "Not mentioned in this recording.",
@@ -79,15 +99,17 @@ namespace MeetMind.Api.Controllers
                 }
 
                 var result = await _aiClient.AskQuestionAsync(title, question, segments, ct);
+                var answerText = result.EvidenceFound ? result.Answer : "Not mentioned in this recording.";
+                await SaveChatTurnAsync(question, answerText, result.EvidenceFound, result.Citations, isMeeting ? request.ResourceId : null, isMeeting ? null : request.ResourceId, ct);
                 return Ok(new
                 {
-                    answer = result.EvidenceFound ? result.Answer : "Not mentioned in this recording.",
+                    answer = answerText,
                     evidenceFound = result.EvidenceFound,
                     citations = result.Citations
                 });
             }
 
-            // Cross-workspace grounded Q&A scoped to current user's completed recordings
+            // Cross-workspace grounded Q&A scoped strictly to current user's completed recordings
             var meetings = await _db.Meetings
                 .Include(m => m.TranscriptSegments)
                 .Where(m => (IsAdmin || m.HostId == _currentUser.UserId) && m.TranscriptSegments.Any())
@@ -114,21 +136,58 @@ namespace MeetMind.Api.Controllers
 
             if (combinedSegments.Count == 0)
             {
+                var noDataMsg = "No completed meeting or lecture transcripts exist yet. Upload or record audio first.";
+                await SaveChatTurnAsync(question, noDataMsg, false, Array.Empty<object>(), null, null, ct);
                 return Ok(new
                 {
-                    answer = "No completed meeting or lecture transcripts exist yet. Upload or record audio first.",
+                    answer = noDataMsg,
                     evidenceFound = false,
                     citations = Array.Empty<object>()
                 });
             }
 
             var workspaceAnswer = await _aiClient.AskQuestionAsync("Workspace Recordings", question, combinedSegments, ct);
+            var finalWorkspaceAnswer = workspaceAnswer.EvidenceFound ? workspaceAnswer.Answer : "Not mentioned in this recording.";
+            await SaveChatTurnAsync(question, finalWorkspaceAnswer, workspaceAnswer.EvidenceFound, workspaceAnswer.Citations, null, null, ct);
             return Ok(new
             {
-                answer = workspaceAnswer.EvidenceFound ? workspaceAnswer.Answer : "Not mentioned in this recording.",
+                answer = finalWorkspaceAnswer,
                 evidenceFound = workspaceAnswer.EvidenceFound,
                 citations = workspaceAnswer.Citations
             });
+        }
+
+        private async Task SaveChatTurnAsync(
+            string question,
+            string answer,
+            bool evidenceFound,
+            object citations,
+            Guid? meetingId,
+            Guid? lectureId,
+            CancellationToken ct)
+        {
+            var now = DateTime.UtcNow;
+            _db.ChatMessages.Add(new ChatMessage
+            {
+                UserId = _currentUser.UserId,
+                MeetingId = meetingId,
+                LectureId = lectureId,
+                Role = "user",
+                Content = question,
+                CreatedAtUtc = now
+            });
+            _db.ChatMessages.Add(new ChatMessage
+            {
+                UserId = _currentUser.UserId,
+                MeetingId = meetingId,
+                LectureId = lectureId,
+                Role = "assistant",
+                Content = answer,
+                EvidenceFound = evidenceFound,
+                CitationsJson = JsonSerializer.Serialize(citations),
+                CreatedAtUtc = now.AddMilliseconds(1)
+            });
+            await _db.SaveChangesAsync(ct);
         }
 
         [HttpPost("analyze")]
@@ -173,7 +232,8 @@ namespace MeetMind.Api.Controllers
 
             await PersistAnalysisResultsAsync(request.ResourceId, title, courseCode, meeting, lecture, analysis, ct);
 
-            await _hub.Clients.All.SendAsync("AIAnalysisCompleted", new
+            var ownerId = meeting?.HostId ?? lecture?.InstructorId ?? _currentUser.UserId;
+            await _hub.Clients.Group($"User_{ownerId}").SendAsync("AIAnalysisCompleted", new
             {
                 resourceId = request.ResourceId,
                 resourceType,
