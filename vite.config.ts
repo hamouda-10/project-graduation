@@ -52,6 +52,7 @@ export default defineConfig({
       allowedHosts: allowedPreviewHosts,
     },
     build: {
+      sourcemap: false,
       rollupOptions: {
         onwarn(warning, warn) {
           if (

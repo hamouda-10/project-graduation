@@ -65,6 +65,151 @@
       "avatarCustomized": false,
       "createdAt": "2026-11-20T03:49:38.587Z",
       "updatedAt": "2026-11-20T03:49:38.587Z"
+    },
+    {
+      "id": "usr_mwplj24c_ce836f74b825",
+      "email": "autotest_1795216460408@meetmind.local",
+      "name": "Persisted Profile Name",
+      "passwordHash": "scrypt$695be1920b0e48d7d023232cf4e3a440$e8e2ec062a4c24c572c2794b5bcffa3e6368a1569bc70780250e35d1b45b5d553ec58bd70b936334694f4556c234873d08750593c06211c5b79e12e237f5c24a",
+      "role": "member",
+      "authProvider": "local",
+      "emailVerified": false,
+      "isGuest": false,
+      "department": "",
+      "nameCustomized": true,
+      "createdAt": "2026-11-20T23:14:20.412Z",
+      "updatedAt": "2026-11-20T23:14:20.719Z",
+      "jobTitle": "Principal Engineer"
+    },
+    {
+      "id": "usr_mwplj2qe_4e5ce4f31e43",
+      "email": "live_empty_1795216461136_iwkt8@meetmind.test",
+      "name": "Test live_empty",
+      "passwordHash": "scrypt$79229b2849e4f8d68fb1c2aad15544ca$299e98040c1b40baf217b0b58ac05ca20413caed8b09da1e9a35ee33fb55b87055d6cd5a4920d35afda36ecea84cbd6b73de8b8dcd9cb967936f68d6e52ed82c",
+      "role": "member",
+      "authProvider": "local",
+      "emailVerified": false,
+      "isGuest": false,
+      "department": "Engineering",
+      "nameCustomized": true,
+      "createdAt": "2026-11-20T23:14:21.206Z",
+      "updatedAt": "2026-11-20T23:14:21.206Z"
+    },
+    {
+      "id": "usr_mwplld3w_441ac0db0ad3",
+      "email": "autotest_1795216567959@meetmind.local",
+      "name": "Persisted Profile Name",
+      "passwordHash": "scrypt$ef19a3b9cc0179bd3f6689af12f8926f$7ad94de7bf2ceafb66fe8d7cac9cf294baf61a0d87e6fed98c1bb7f34300a4b070e0b2aa3d8d98cc0ca48a1166154ae997eace922dd306b8d9d96149a72a05ee",
+      "role": "member",
+      "authProvider": "local",
+      "emailVerified": false,
+      "isGuest": false,
+      "department": "",
+      "nameCustomized": true,
+      "createdAt": "2026-11-20T23:16:07.964Z",
+      "updatedAt": "2026-11-20T23:16:08.226Z",
+      "jobTitle": "Principal Engineer"
+    },
+    {
+      "id": "usr_mwplnsnj_5d2433eeb275",
+      "email": "autotest_1795216681420@meetmind.local",
+      "name": "Persisted Profile Name",
+      "passwordHash": "scrypt$7a91213121f029daaae4972059a3e21d$c678043c6ecc0c2d5b00d0633f6e8529d5951a5f4e6fb2fc1ee8afb837f010fe801b18a686ff94adce086b44fd1bd95a9c038124b15cbb0c2ffed4939487bf00",
+      "role": "member",
+      "authProvider": "local",
+      "emailVerified": false,
+      "isGuest": false,
+      "department": "",
+      "nameCustomized": true,
+      "createdAt": "2026-11-20T23:18:01.423Z",
+      "updatedAt": "2026-11-20T23:18:01.711Z",
+      "jobTitle": "Principal Engineer"
+    },
+    {
+      "id": "usr_mwplnt53_91c7b00660d7",
+      "email": "iso_owner_1795216681951_n34u1@meetmind.test",
+      "name": "Test iso_owner",
+      "passwordHash": "scrypt$b27cef5add6fdec772bd1b05296255a5$61a10f2c1475f5d345dc31e1292a52f7d81188079c7ab7ba233c8b95b3453a451a3fa530c9159703c0847a18afaf726c028e4d76d902bb4a78fae352bb90e4f3",
+      "role": "member",
+      "authProvider": "local",
+      "emailVerified": false,
+      "isGuest": false,
+      "department": "Engineering",
+      "nameCustomized": true,
+      "createdAt": "2026-11-20T23:18:02.055Z",
+      "updatedAt": "2026-11-20T23:18:02.055Z"
+    },
+    {
+      "id": "usr_mwplnt75_a2fc3bd2135f",
+      "email": "iso_other_1795216682124_oynq5@meetmind.test",
+      "name": "Test iso_other",
+      "passwordHash": "scrypt$4b3be2abff47362cbb73ae66d92e7cf8$57005a07e6b81c81a294125e1d3f347546b348651cc460289e1587bf32ef0ddf200e8c4e1cc46deaf747a72a321ccf735fc6d125d7f31bc609a097e30155b8b8",
+      "role": "member",
+      "authProvider": "local",
+      "emailVerified": false,
+      "isGuest": false,
+      "department": "Engineering",
+      "nameCustomized": true,
+      "createdAt": "2026-11-20T23:18:02.129Z",
+      "updatedAt": "2026-11-20T23:18:02.129Z"
+    },
+    {
+      "id": "usr_mwplnta5_f4f5bfcc35cd",
+      "email": "live_e2e_1795216682236_vvy9s@meetmind.test",
+      "name": "Test live_e2e",
+      "passwordHash": "scrypt$44b770732a2b65cfb0902744dacbf04b$25703a2eb91b636b7f3b4a3c2de7c1cb7060438fab81e660c904a59efc68cf04ac8b4439c8ba36ac3ac028012fa989aeb990daed8a7922e99ba6837a6cf89d28",
+      "role": "member",
+      "authProvider": "local",
+      "emailVerified": false,
+      "isGuest": false,
+      "department": "Engineering",
+      "nameCustomized": true,
+      "createdAt": "2026-11-20T23:18:02.237Z",
+      "updatedAt": "2026-11-20T23:18:02.237Z"
+    },
+    {
+      "id": "usr_mwplnu3r_6393fbdbecfe",
+      "email": "live_empty_1795216683298_tg3fo@meetmind.test",
+      "name": "Test live_empty",
+      "passwordHash": "scrypt$525babbe2759ad8e8c545e290deae7de$91e7e6797abae1eb0723afeedc2cad9143c4ffa439bff31c265c633763ecce99589bc72764052c98554bd0d47885a9a46efd44b62282bb4ddfbce98c3f1adde7",
+      "role": "member",
+      "authProvider": "local",
+      "emailVerified": false,
+      "isGuest": false,
+      "department": "Engineering",
+      "nameCustomized": true,
+      "createdAt": "2026-11-20T23:18:03.303Z",
+      "updatedAt": "2026-11-20T23:18:03.303Z"
+    },
+    {
+      "id": "usr_mwplpcge_997e0fb72f90",
+      "email": "autotest_1795216753736@meetmind.local",
+      "name": "Persisted Profile Name",
+      "passwordHash": "scrypt$0ee2c76ba47e6a71988efd04aab65dbf$f759aef25b7cb68701a811bfc2888acb16ed377916a3d3eb0e6810b6d55f07bd397f3dc78779a959c38b2a18cdd135d60c765776f398fd2fe8d0ea6f0bd5240d",
+      "role": "member",
+      "authProvider": "local",
+      "emailVerified": false,
+      "isGuest": false,
+      "department": "",
+      "nameCustomized": true,
+      "createdAt": "2026-11-20T23:19:13.742Z",
+      "updatedAt": "2026-11-20T23:19:13.997Z",
+      "jobTitle": "Principal Engineer"
+    },
+    {
+      "id": "usr_mwplqs5z_5d9d87be1519",
+      "email": "autotest_1795216820755@meetmind.local",
+      "name": "Persisted Profile Name",
+      "passwordHash": "scrypt$440e6c1c06ff86a7a919490de7ebabdd$b79d378a5c98ac9d24c8f6a8314d53379d6bc0968543da656f5136115d23e6b5dacc342625a425a4ae516afbf4c5414be1932d933c7c299cb300c1eb19d2ad62",
+      "role": "member",
+      "authProvider": "local",
+      "emailVerified": false,
+      "isGuest": false,
+      "department": "",
+      "nameCustomized": true,
+      "createdAt": "2026-11-20T23:20:20.759Z",
+      "updatedAt": "2026-11-20T23:20:21.037Z",
+      "jobTitle": "Principal Engineer"
     }
   ],
   "workspaces": [
@@ -78,6 +223,38 @@
     }
   ],
   "meetings": [
+    {
+      "id": "m_1795216683366_e8cc",
+      "workspaceId": "ws_default",
+      "title": "جلسة فارغة للتحقق",
+      "hostName": "المتحدث 1",
+      "hostId": "usr_mwplnu3r_6393fbdbecfe",
+      "date": "2026-11-20",
+      "durationSeconds": 1,
+      "participantsCount": 1,
+      "status": "Failed",
+      "language": "ar-EG",
+      "segments": [],
+      "fullText": "",
+      "createdAt": "2026-11-20T23:18:03.366Z",
+      "updatedAt": "2026-11-20T23:18:03.373Z"
+    },
+    {
+      "id": "m_1795216461267_ca6d",
+      "workspaceId": "ws_default",
+      "title": "جلسة فارغة للتحقق",
+      "hostName": "المتحدث 1",
+      "hostId": "usr_mwplj2qe_4e5ce4f31e43",
+      "date": "2026-11-20",
+      "durationSeconds": 1,
+      "participantsCount": 1,
+      "status": "Failed",
+      "language": "ar-EG",
+      "segments": [],
+      "fullText": "",
+      "createdAt": "2026-11-20T23:14:21.267Z",
+      "updatedAt": "2026-11-20T23:14:21.276Z"
+    },
     {
       "id": "m_1795139775766",
       "workspaceId": "ws_default",
@@ -660,6 +837,38 @@
   ],
   "lectures": [
     {
+      "id": "l_1795216682326_8080",
+      "workspaceId": "ws_default",
+      "title": "محاضرة هندسة أنظمة الزمن الحقيقي — اختبار مباشر",
+      "courseCode": "CS 710",
+      "instructorName": "د. طارق",
+      "instructorId": "usr_mwplnta5_f4f5bfcc35cd",
+      "date": "2026-11-20",
+      "durationSeconds": 1,
+      "status": "Processing",
+      "language": "mixed",
+      "segments": [],
+      "fullText": "",
+      "createdAt": "2026-11-20T23:18:02.326Z",
+      "updatedAt": "2026-11-20T23:18:02.326Z"
+    },
+    {
+      "id": "l_1795216682192_0df2",
+      "workspaceId": "ws_default",
+      "title": "جلسة خاصة للمستخدم الأول",
+      "courseCode": "SEC 401",
+      "instructorName": "د. سارة",
+      "instructorId": "usr_mwplnt53_91c7b00660d7",
+      "date": "2026-11-20",
+      "durationSeconds": 1,
+      "status": "Processing",
+      "language": "ar-EG",
+      "segments": [],
+      "fullText": "",
+      "createdAt": "2026-11-20T23:18:02.192Z",
+      "updatedAt": "2026-11-20T23:18:02.192Z"
+    },
+    {
       "id": "l_1794252541452",
       "workspaceId": "ws_default",
       "title": "محاضرة: سنن الابتلاء وحقيقة الحياة",
@@ -676,7 +885,54 @@
       "updatedAt": "2026-11-09T19:29:01.452Z"
     }
   ],
-  "actionItems": [],
+  "actionItems": [
+    {
+      "id": "task_live_l_1795216754790_edc2_1795216756473_1",
+      "userId": "usr_mwplpd7w_c09a64215708",
+      "lectureId": "l_1795216754790_edc2",
+      "title": "دي نقطة مهمة جداً ممكن تيجي في الامتحان: لازم نستخدم نظام Queue مع Idempotency Key عشان نمنع تكرار البيانات لو حصل انقطا...",
+      "ownerName": "Not specified",
+      "deadlineText": "Not specified",
+      "sourceTimestamp": "00:12",
+      "priority": "high",
+      "completed": false,
+      "createdAt": "2026-11-20T23:19:16.981Z"
+    },
+    {
+      "id": "task_live_l_1795216754790_edc2_1795216756473_2",
+      "userId": "usr_mwplpd7w_c09a64215708",
+      "lectureId": "l_1795216754790_edc2",
+      "title": "دي نقطة مهمة جداً ممكن تيجي في الامتحان: لازم نستخدم نظام Queue مع Idempotency Key عشان نمنع تكرار البيانات لو حصل انقطاع في الشبكة.",
+      "ownerName": "Not specified",
+      "deadlineText": "Not specified",
+      "priority": "medium",
+      "completed": false,
+      "createdAt": "2026-11-20T23:19:16.981Z"
+    },
+    {
+      "id": "task_live_l_1795216821529_eda9_1795216822793_1",
+      "userId": "usr_mwplqspx_207740548d74",
+      "lectureId": "l_1795216821529_eda9",
+      "title": "دي نقطة مهمة جداً ممكن تيجي في الامتحان: لازم نستخدم نظام Queue مع Idempotency Key عشان نمنع تكرار البيانات لو حصل انقطا...",
+      "ownerName": "Not specified",
+      "deadlineText": "Not specified",
+      "sourceTimestamp": "00:12",
+      "priority": "high",
+      "completed": false,
+      "createdAt": "2026-11-20T23:20:23.121Z"
+    },
+    {
+      "id": "task_live_l_1795216821529_eda9_1795216822793_2",
+      "userId": "usr_mwplqspx_207740548d74",
+      "lectureId": "l_1795216821529_eda9",
+      "title": "دي نقطة مهمة جداً ممكن تيجي في الامتحان: لازم نستخدم نظام Queue مع Idempotency Key عشان نمنع تكرار البيانات لو حصل انقطاع في الشبكة.",
+      "ownerName": "Not specified",
+      "deadlineText": "Not specified",
+      "priority": "medium",
+      "completed": false,
+      "createdAt": "2026-11-20T23:20:23.121Z"
+    }
+  ],
   "quizzes": [],
   "flashcards": [],
   "mindMaps": [],
@@ -919,6 +1175,74 @@
     }
   ],
   "recordingSessions": [
+    {
+      "id": "m_1795216683366_e8cc",
+      "userId": "usr_mwplnu3r_6393fbdbecfe",
+      "type": "meeting",
+      "title": "جلسة فارغة للتحقق",
+      "courseCode": "GEN 101",
+      "speakerName": "المتحدث 1",
+      "language": "ar-EG",
+      "status": "Failed",
+      "startedAt": "2026-11-20T23:18:03.366Z",
+      "updatedAt": "2026-11-20T23:18:03.373Z",
+      "segmentsCount": 0,
+      "lastSequenceNumber": -1,
+      "receivedChunkIds": [],
+      "durationSeconds": 3,
+      "errorMessage": "No audible speech was captured during this recording session.",
+      "completedAt": "2026-11-20T23:18:03.373Z"
+    },
+    {
+      "id": "l_1795216682326_8080",
+      "userId": "usr_mwplnta5_f4f5bfcc35cd",
+      "type": "lecture",
+      "title": "محاضرة هندسة أنظمة الزمن الحقيقي — اختبار مباشر",
+      "courseCode": "CS 710",
+      "speakerName": "د. طارق",
+      "language": "mixed",
+      "status": "Recording",
+      "startedAt": "2026-11-20T23:18:02.326Z",
+      "updatedAt": "2026-11-20T23:18:02.326Z",
+      "segmentsCount": 0,
+      "lastSequenceNumber": -1,
+      "receivedChunkIds": [],
+      "durationSeconds": 0
+    },
+    {
+      "id": "l_1795216682192_0df2",
+      "userId": "usr_mwplnt53_91c7b00660d7",
+      "type": "lecture",
+      "title": "جلسة خاصة للمستخدم الأول",
+      "courseCode": "SEC 401",
+      "speakerName": "د. سارة",
+      "language": "ar-EG",
+      "status": "Recording",
+      "startedAt": "2026-11-20T23:18:02.192Z",
+      "updatedAt": "2026-11-20T23:18:02.192Z",
+      "segmentsCount": 0,
+      "lastSequenceNumber": -1,
+      "receivedChunkIds": [],
+      "durationSeconds": 0
+    },
+    {
+      "id": "m_1795216461267_ca6d",
+      "userId": "usr_mwplj2qe_4e5ce4f31e43",
+      "type": "meeting",
+      "title": "جلسة فارغة للتحقق",
+      "courseCode": "GEN 101",
+      "speakerName": "المتحدث 1",
+      "language": "ar-EG",
+      "status": "Failed",
+      "startedAt": "2026-11-20T23:14:21.267Z",
+      "updatedAt": "2026-11-20T23:14:21.276Z",
+      "segmentsCount": 0,
+      "lastSequenceNumber": -1,
+      "receivedChunkIds": [],
+      "durationSeconds": 3,
+      "errorMessage": "No audible speech was captured during this recording session.",
+      "completedAt": "2026-11-20T23:14:21.276Z"
+    },
     {
       "id": "l_1793382122254",
       "type": "lecture",
@@ -1224,16 +1548,224 @@
       "lastUsedAt": "2026-11-20T03:08:11.893Z"
     },
     {
-      "id": "ses_mwof2h91_e7ef7da81bd59babb2ac",
-      "userId": "guest_mwof2h91_3a6de611ca75",
-      "refreshTokenHash": "5471ddd013929b8a9b384e97113309438e462a6dd1e2e5b0d5599fa75ec3cf84",
-      "isGuest": true,
+      "id": "ses_mwplj26z_f2c2b4ec6a6f87617209",
+      "userId": "usr_mwplj24c_ce836f74b825",
+      "refreshTokenHash": "87069848ae5fced493f1f339e29dc2a95a6c36198cddbe3c906d5f5007e6cac1",
+      "isGuest": false,
+      "rememberMe": true,
+      "userAgent": "node",
+      "expiresAt": "2026-12-20T23:14:20.507Z",
+      "createdAt": "2026-11-20T23:14:20.507Z",
+      "lastUsedAt": "2026-11-20T23:14:20.507Z"
+    },
+    {
+      "id": "ses_mwplj2as_d0ea263a8c2704c12183",
+      "userId": "usr_mwplj24c_ce836f74b825",
+      "refreshTokenHash": "b9554e3b69454923fd4a03704d0a8cba552c45c799bb13b73f47cccb166102a8",
+      "isGuest": false,
       "rememberMe": false,
-      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36",
-      "ipAddress": "197.134.212.28",
-      "expiresAt": "2026-11-20T15:25:42.997Z",
-      "createdAt": "2026-11-20T03:25:42.997Z",
-      "lastUsedAt": "2026-11-20T03:25:42.997Z"
+      "userAgent": "node",
+      "expiresAt": "2026-11-21T23:14:20.645Z",
+      "createdAt": "2026-11-20T23:14:20.645Z",
+      "lastUsedAt": "2026-11-20T23:14:20.645Z"
+    },
+    {
+      "id": "ses_mwplj2em_12ba5c14fb1a64b2262d",
+      "userId": "usr_mwplj24c_ce836f74b825",
+      "refreshTokenHash": "1a12f14ed818ad2a8a68d41b81582a1b28b5ae250c6b460e4a40de8d83212e11",
+      "isGuest": false,
+      "rememberMe": true,
+      "userAgent": "node",
+      "expiresAt": "2026-12-20T23:14:20.782Z",
+      "createdAt": "2026-11-20T23:14:20.782Z",
+      "lastUsedAt": "2026-11-20T23:14:20.782Z"
+    },
+    {
+      "id": "ses_mwplj2rq_6772a5bb853971362354",
+      "userId": "usr_mwplj2qe_4e5ce4f31e43",
+      "refreshTokenHash": "718c1305f57441b78b78e90b034250d822626bc2c95e8e69c054c61cbd73ccef",
+      "isGuest": false,
+      "rememberMe": true,
+      "userAgent": "node",
+      "expiresAt": "2026-12-20T23:14:21.254Z",
+      "createdAt": "2026-11-20T23:14:21.254Z",
+      "lastUsedAt": "2026-11-20T23:14:21.254Z"
+    },
+    {
+      "id": "ses_mwplld5i_d5eaca24beb8ff6bd48d",
+      "userId": "usr_mwplld3w_441ac0db0ad3",
+      "refreshTokenHash": "0532c479f57b8c5c3c74a09748e28b819b7681a1e10fbe88a2bb513879c039d1",
+      "isGuest": false,
+      "rememberMe": true,
+      "userAgent": "node",
+      "expiresAt": "2026-12-20T23:16:08.022Z",
+      "createdAt": "2026-11-20T23:16:08.022Z",
+      "lastUsedAt": "2026-11-20T23:16:08.022Z"
+    },
+    {
+      "id": "ses_mwplld8z_df710c4338ab2231c45c",
+      "userId": "usr_mwplld3w_441ac0db0ad3",
+      "refreshTokenHash": "5a842afdc842309bb485bcbf051b77c3a13da0c912ff265c05de7bef2b639006",
+      "isGuest": false,
+      "rememberMe": false,
+      "userAgent": "node",
+      "expiresAt": "2026-11-21T23:16:08.147Z",
+      "createdAt": "2026-11-20T23:16:08.147Z",
+      "lastUsedAt": "2026-11-20T23:16:08.147Z"
+    },
+    {
+      "id": "ses_mwplldd4_51174e50a53b37741afe",
+      "userId": "usr_mwplld3w_441ac0db0ad3",
+      "refreshTokenHash": "b1797b752ad19240a04eaf2412cc7cf389c6840514cd7c4bdd97ad4911d37d46",
+      "isGuest": false,
+      "rememberMe": true,
+      "userAgent": "node",
+      "expiresAt": "2026-12-20T23:16:08.296Z",
+      "createdAt": "2026-11-20T23:16:08.296Z",
+      "lastUsedAt": "2026-11-20T23:16:08.296Z"
+    },
+    {
+      "id": "ses_mwplnspz_89e0338d415ec7bb165a",
+      "userId": "usr_mwplnsnj_5d2433eeb275",
+      "refreshTokenHash": "d033f52e4da759c2cfbc125ee4ac5ad5ca6ec05afebfb55cb645ef412c5abdcf",
+      "isGuest": false,
+      "rememberMe": true,
+      "userAgent": "node",
+      "expiresAt": "2026-12-20T23:18:01.512Z",
+      "createdAt": "2026-11-20T23:18:01.512Z",
+      "lastUsedAt": "2026-11-20T23:18:01.512Z"
+    },
+    {
+      "id": "ses_mwplnstm_a4cd0a89a59d55e141b3",
+      "userId": "usr_mwplnsnj_5d2433eeb275",
+      "refreshTokenHash": "c44687b654dfa2b7293d6f6d315084debe8e31588f745188435482081417c995",
+      "isGuest": false,
+      "rememberMe": false,
+      "userAgent": "node",
+      "expiresAt": "2026-11-21T23:18:01.642Z",
+      "createdAt": "2026-11-20T23:18:01.642Z",
+      "lastUsedAt": "2026-11-20T23:18:01.642Z"
+    },
+    {
+      "id": "ses_mwplnsxi_0460ec266aa6eea25e9d",
+      "userId": "usr_mwplnsnj_5d2433eeb275",
+      "refreshTokenHash": "0db728f0a2a5e7f4e4cf2d931cceb4bedbe5d0875a7207a25329cf2261b6a052",
+      "isGuest": false,
+      "rememberMe": true,
+      "userAgent": "node",
+      "expiresAt": "2026-12-20T23:18:01.782Z",
+      "createdAt": "2026-11-20T23:18:01.782Z",
+      "lastUsedAt": "2026-11-20T23:18:01.782Z"
+    },
+    {
+      "id": "ses_mwplnt6p_73263ffe31383c8f39cd",
+      "userId": "usr_mwplnt53_91c7b00660d7",
+      "refreshTokenHash": "3a4dde7e2e4cdba29b0b464c7cd6f9c858a3b85d3ce7dbbb3478551e6b4ca130",
+      "isGuest": false,
+      "rememberMe": true,
+      "userAgent": "node",
+      "expiresAt": "2026-12-20T23:18:02.114Z",
+      "createdAt": "2026-11-20T23:18:02.114Z",
+      "lastUsedAt": "2026-11-20T23:18:02.114Z"
+    },
+    {
+      "id": "ses_mwplnt8l_58fa8400a07177dd6b2f",
+      "userId": "usr_mwplnt75_a2fc3bd2135f",
+      "refreshTokenHash": "8eecc09fac645509c68c5dca3274e2eec73ee623d1a78d3c3e1d5e9865e04701",
+      "isGuest": false,
+      "rememberMe": true,
+      "userAgent": "node",
+      "expiresAt": "2026-12-20T23:18:02.181Z",
+      "createdAt": "2026-11-20T23:18:02.181Z",
+      "lastUsedAt": "2026-11-20T23:18:02.181Z"
+    },
+    {
+      "id": "ses_mwplntcf_91a8c5ae7011f968c93d",
+      "userId": "usr_mwplnta5_f4f5bfcc35cd",
+      "refreshTokenHash": "f74ddb90e37a52f71b36fdf88b087d1d477518cc0346e76372198c22e9009e34",
+      "isGuest": false,
+      "rememberMe": true,
+      "userAgent": "node",
+      "expiresAt": "2026-12-20T23:18:02.319Z",
+      "createdAt": "2026-11-20T23:18:02.319Z",
+      "lastUsedAt": "2026-11-20T23:18:02.319Z"
+    },
+    {
+      "id": "ses_mwplnu5b_46b80cbd00a3dcd636b5",
+      "userId": "usr_mwplnu3r_6393fbdbecfe",
+      "refreshTokenHash": "0edfb533b9cc793bc08a92fb09181eb09d7c783c1abece63ac08b124b7b6e421",
+      "isGuest": false,
+      "rememberMe": true,
+      "userAgent": "node",
+      "expiresAt": "2026-12-20T23:18:03.359Z",
+      "createdAt": "2026-11-20T23:18:03.359Z",
+      "lastUsedAt": "2026-11-20T23:18:03.359Z"
+    },
+    {
+      "id": "ses_mwplpci2_cdd58e1d967c38570756",
+      "userId": "usr_mwplpcge_997e0fb72f90",
+      "refreshTokenHash": "fe70b60d91c25f0e16627eb274c87f8ee2ab9d82c38d906e90b3f0a8d5c556ff",
+      "isGuest": false,
+      "rememberMe": true,
+      "userAgent": "node",
+      "expiresAt": "2026-12-20T23:19:13.802Z",
+      "createdAt": "2026-11-20T23:19:13.802Z",
+      "lastUsedAt": "2026-11-20T23:19:13.802Z"
+    },
+    {
+      "id": "ses_mwplpclc_646654b330c922e8a136",
+      "userId": "usr_mwplpcge_997e0fb72f90",
+      "refreshTokenHash": "1a4896f9ab5b5ffb53cd60cdafbbbdf299ebdd6a7578a6adc74b105def981293",
+      "isGuest": false,
+      "rememberMe": false,
+      "userAgent": "node",
+      "expiresAt": "2026-11-21T23:19:13.920Z",
+      "createdAt": "2026-11-20T23:19:13.920Z",
+      "lastUsedAt": "2026-11-20T23:19:13.920Z"
+    },
+    {
+      "id": "ses_mwplpcpf_1d7cb1a3456efc398958",
+      "userId": "usr_mwplpcge_997e0fb72f90",
+      "refreshTokenHash": "91eb62c2a057a7024e5dd0b15f063792cd209ca17399f0887efee1aa0a0d743f",
+      "isGuest": false,
+      "rememberMe": true,
+      "userAgent": "node",
+      "expiresAt": "2026-12-20T23:19:14.067Z",
+      "createdAt": "2026-11-20T23:19:14.067Z",
+      "lastUsedAt": "2026-11-20T23:19:14.067Z"
+    },
+    {
+      "id": "ses_mwplqs81_281d069b865cc817134c",
+      "userId": "usr_mwplqs5z_5d9d87be1519",
+      "refreshTokenHash": "2466e773854208da0aa391e2aa5ab5ec4f2d5b9538466e26fd35b13414f055b5",
+      "isGuest": false,
+      "rememberMe": true,
+      "userAgent": "node",
+      "expiresAt": "2026-12-20T23:20:20.833Z",
+      "createdAt": "2026-11-20T23:20:20.833Z",
+      "lastUsedAt": "2026-11-20T23:20:20.833Z"
+    },
+    {
+      "id": "ses_mwplqsbj_b81583b292a22a22f3a8",
+      "userId": "usr_mwplqs5z_5d9d87be1519",
+      "refreshTokenHash": "ea54740a8785e35d7480f61060cd9ce24087b1a2e3961880fc899fcaf359db07",
+      "isGuest": false,
+      "rememberMe": false,
+      "userAgent": "node",
+      "expiresAt": "2026-11-21T23:20:20.960Z",
+      "createdAt": "2026-11-20T23:20:20.960Z",
+      "lastUsedAt": "2026-11-20T23:20:20.960Z"
+    },
+    {
+      "id": "ses_mwplqsfg_5874f08f4d1c0303b0fd",
+      "userId": "usr_mwplqs5z_5d9d87be1519",
+      "refreshTokenHash": "ec083361140785ab4af239bd7db43a79d644257f0ba8716b6ae20168762f1334",
+      "isGuest": false,
+      "rememberMe": true,
+      "userAgent": "node",
+      "expiresAt": "2026-12-20T23:20:21.101Z",
+      "createdAt": "2026-11-20T23:20:21.101Z",
+      "lastUsedAt": "2026-11-20T23:20:21.101Z"
     }
   ],
   "passwordResetTokens": [
@@ -1247,56 +1779,44 @@
   ],
   "revokedTokens": [
     {
-      "jti": "jti_55c4c28e74ace6cdd094aecb",
-      "exp": 1795185038
+      "jti": "jti_0a558041d7f8af21c1a86618",
+      "exp": 1795259660
     },
     {
-      "jti": "jti_39650106a35bcb2947d89d21",
-      "exp": 1795185046
+      "jti": "jti_3dc5225764fb8ef5a6b2e6e8",
+      "exp": 1795259660
     },
     {
-      "jti": "jti_f9a2ccf4b5bd59ea4df9b3c4",
-      "exp": 1795186421
+      "jti": "jti_115fa6809deb003fd1401035",
+      "exp": 1795259768
     },
     {
-      "jti": "jti_57fd4468b5001aac8fe4040a",
-      "exp": 1795187292
+      "jti": "jti_39bce35353ca0f8a14842f12",
+      "exp": 1795259768
     },
     {
-      "jti": "jti_151d763f7579e95238903a40",
-      "exp": 1795187292
+      "jti": "jti_6b5e3ade80a128ec25a1fef4",
+      "exp": 1795259881
     },
     {
-      "jti": "jti_e1f723ed5a48ee5502599a00",
-      "exp": 1795188330
+      "jti": "jti_ac269c2632838556e5b82f63",
+      "exp": 1795259881
     },
     {
-      "jti": "jti_9f2aade7bf22924c1c67d345",
-      "exp": 1795188502
+      "jti": "jti_3a1ba3a66e0c23b02461c403",
+      "exp": 1795259953
     },
     {
-      "jti": "jti_767eacb60018c1225cdf6b89",
-      "exp": 1795188502
+      "jti": "jti_51c421aa3e2b26d1b5ca0d06",
+      "exp": 1795259954
     },
     {
-      "jti": "jti_b8e871fb5dd4b9703fa94d18",
-      "exp": 1795188621
+      "jti": "jti_fd000970bd20cf6fab35444d",
+      "exp": 1795260021
     },
     {
-      "jti": "jti_ed35b411ab3bf600012126ba",
-      "exp": 1795188621
-    },
-    {
-      "jti": "jti_f9017135775cefbd0547de37",
-      "exp": 1795189778
-    },
-    {
-      "jti": "jti_d13d55100682a41df988b115",
-      "exp": 1795189898
-    },
-    {
-      "jti": "jti_aef63010ebabc6d998d2adf8",
-      "exp": 1795189898
+      "jti": "jti_2ebd222b20a4b9fc8b1d4fdd",
+      "exp": 1795260021
     }
   ]
 }

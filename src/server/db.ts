@@ -82,6 +82,8 @@ export interface TranscriptSegment {
   language?: string;
   isPartial?: boolean;
   chunkIndex?: number;
+  sequenceNumber?: number;
+  chunkId?: string;
 }
 
 export interface KeywordItem {
@@ -89,6 +91,8 @@ export interface KeywordItem {
   frequency: number;
   importance: number;
   segmentIds?: string[];
+  context?: string;
+  timestamp?: string;
 }
 
 export interface HighlightItem {
@@ -192,15 +196,22 @@ export interface LectureRecord {
 
 export interface RecordingSessionRecord {
   id: string;
+  userId?: string;
   type: "meeting" | "lecture";
   title: string;
   courseCode?: string;
   speakerName?: string;
-  status: "Recording" | "Processing" | "Completed" | "Failed";
+  language?: string;
+  status:
+    "Recording" | "Paused" | "Interrupted" | "Recovering" | "Processing" | "Completed" | "Failed";
   startedAt: string;
   updatedAt: string;
   completedAt?: string;
   segmentsCount: number;
+  lastSequenceNumber?: number;
+  receivedChunkIds?: string[];
+  durationSeconds?: number;
+  errorMessage?: string;
 }
 
 export interface QuizQuestionRecord {
@@ -216,6 +227,8 @@ export interface QuizQuestionRecord {
   sectionRef?: string;
   timestampRef?: string;
   sourceReference?: string;
+  sourceTranscriptSegment?: string;
+  groundingVerified?: boolean;
 }
 
 export interface QuizAttemptRecord {

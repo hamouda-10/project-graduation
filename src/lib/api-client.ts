@@ -22,6 +22,8 @@ export interface KeywordItem {
   term: string;
   frequency: number;
   importance: number;
+  context?: string;
+  timestamp?: string;
   segmentIds?: string[];
 }
 
@@ -44,6 +46,8 @@ export interface TranscriptSegmentItem {
   language?: string;
   isPartial?: boolean;
   chunkIndex?: number;
+  sequenceNumber?: number;
+  chunkId?: string;
 }
 
 export interface Meeting {
@@ -124,6 +128,8 @@ export interface QuizQuestion {
   sectionRef?: string;
   timestampRef?: string;
   sourceReference?: string;
+  sourceTranscriptSegment?: string;
+  groundingVerified?: boolean;
 }
 
 export interface QuizAttempt {
@@ -1036,29 +1042,44 @@ class ApiClient {
 
   async sendLiveChunk(data: {
     recordingId: string | null;
+    sessionId?: string | null;
+    chunkId?: string;
+    sequenceNumber?: number;
     audioBase64: string;
     mimeType: string;
     chunkIndex: number;
     startTime: number;
     endTime: number;
+    duration?: number;
     speaker: string;
     language: string;
+    isMeeting?: boolean;
     interimText?: string;
     recentContext?: string;
   }): Promise<{
     success: boolean;
+    duplicate?: boolean;
+    chunkId?: string;
+    sequenceNumber?: number;
     chunkIndex: number;
+    segmentId?: string;
     startTime: number;
     endTime: number;
     speaker: string;
     arabicText?: string;
     text?: string;
+    isSilence?: boolean;
     detectedLanguage?: string;
+    isFinal?: boolean;
     savedToDb?: boolean;
+    error?: string;
+    retryable?: boolean;
   }> {
     return this.request("/api/v1/transcripts/live-chunk", {
       method: "POST",
       body: JSON.stringify(data),
+      timeoutMs: 45000,
+      retries: 0,
     });
   }
 
@@ -1068,16 +1089,57 @@ class ApiClient {
     title: string;
     courseCode?: string;
     speakerName?: string;
+    language?: string;
   }): Promise<{
     success: boolean;
     recordingId: string;
     resourceId: string;
     type: string;
     title: string;
+    language?: string;
+    status?: string;
   }> {
     return this.request("/api/v1/recordings/session/start", {
       method: "POST",
       body: JSON.stringify(data),
+      retries: 0,
+    });
+  }
+
+  async getActiveRecordingSession(): Promise<{
+    success: boolean;
+    session: {
+      id: string;
+      recordingId: string;
+      type: "meeting" | "lecture";
+      title: string;
+      courseCode?: string;
+      speakerName?: string;
+      language?: string;
+      status: "Recording" | "Paused" | "Interrupted" | "Recovering";
+      startedAt: string;
+      updatedAt: string;
+      segmentsCount: number;
+      lastSequenceNumber?: number;
+      receivedChunkIds?: string[];
+      durationSeconds: number;
+      segments: TranscriptSegmentItem[];
+    } | null;
+  }> {
+    return this.request("/api/v1/recordings/session/active", {
+      retries: 0,
+    });
+  }
+
+  async updateRecordingSessionStatus(
+    recordingId: string,
+    status: "Recording" | "Paused" | "Interrupted" | "Recovering",
+    durationSeconds?: number,
+  ): Promise<{ success: boolean; recordingId: string; status: string }> {
+    return this.request(`/api/v1/recordings/session/${encodeURIComponent(recordingId)}/status`, {
+      method: "PATCH",
+      body: JSON.stringify({ status, durationSeconds }),
+      retries: 0,
     });
   }
 
@@ -1090,24 +1152,33 @@ class ApiClient {
       endTime: number;
       text: string;
       isFinal?: boolean;
+      sequenceNumber?: number;
+      chunkId?: string;
     };
   }): Promise<{ success: boolean; recordingId: string; totalSegments: number; saved: boolean }> {
     return this.request("/api/v1/transcripts/session/append-segment", {
       method: "POST",
       body: JSON.stringify(data),
+      retries: 0,
     });
   }
 
   async getRecordingSessionTranscript(recordingId: string): Promise<{
     success: boolean;
     recordingId: string;
+    type?: "meeting" | "lecture";
     title: string;
+    courseCode?: string;
+    language?: string;
     status: string;
+    resourceStatus?: string;
     segments: Meeting["segments"];
     fullText: string;
     durationSeconds: number;
+    lastSequenceNumber?: number;
+    receivedChunkIds?: string[];
   }> {
-    return this.request(`/api/v1/transcripts/session/${recordingId}`);
+    return this.request(`/api/v1/transcripts/session/${encodeURIComponent(recordingId)}`);
   }
 
   async finalizeLiveSession(data: {
@@ -1122,13 +1193,26 @@ class ApiClient {
   }): Promise<{
     success: boolean;
     resourceId: string;
+    jobId?: string;
     segmentsCount: number;
     hasAudio: boolean;
     status: string;
+    error?: string;
+    pipeline?: {
+      keywordsCount: number;
+      highlightsCount: number;
+      decisionsCount: number;
+      tasksCount: number;
+      quizQuestionsCount: number;
+      flashcardsCount: number;
+      hasMindMap: boolean;
+    };
   }> {
     return this.request("/api/v1/transcripts/live-session/finalize", {
       method: "POST",
       body: JSON.stringify(data),
+      timeoutMs: 180000,
+      retries: 0,
     });
   }
 

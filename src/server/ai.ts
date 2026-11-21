@@ -1,9 +1,21 @@
+import crypto from "node:crypto";
+import { execFile } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { promisify } from "node:util";
 import { ThinkingLevel } from "@google/genai";
 import { db, TranscriptSegment, MindMapNode } from "./db";
 import { extractGeminiTranscriptText, getGeminiClient } from "./gemini";
 
+const execFileAsync = promisify(execFile);
+const TEXT_MODEL = "gemini-4-hydrogen";
+const ASR_MODEL = "gemini-3.5-transcribe";
+
 export interface AIAnalysisResult {
   summary: string;
+  executiveSummary?: string;
+  detailedSummary?: string;
   keyPoints: string[];
   decisions: string[];
   topics: string[];
@@ -11,6 +23,7 @@ export interface AIAnalysisResult {
     title: string;
     ownerName?: string;
     dueDate?: string;
+    sourceTimestamp?: string;
     priority: "high" | "medium" | "low";
   }[];
   lectureNotes?: string;
@@ -33,35 +46,82 @@ export interface AIAnalysisResult {
 
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL?.replace(/\/$/, "");
 
+function normalizeArabicAndLatin(input: string): string {
+  return (input || "")
+    .toLowerCase()
+    .replace(/[\u064B-\u065F\u0670]/g, "") // strip Arabic diacritics
+    .replace(/[أإآٱ]/g, "ا")
+    .replace(/ة/g, "ه")
+    .replace(/ى/g, "ي")
+    .replace(/[^\u0600-\u06FFa-z0-9._\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function formatMmSs(sec: number): string {
+  const safe = Math.max(0, Math.floor(Number.isFinite(sec) ? sec : 0));
+  const mins = Math.floor(safe / 60);
+  const secs = safe % 60;
+  return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+}
+
 export function extractKeywordsWithFrequency(
   segments: TranscriptSegment[],
-  limit = 10,
-): Array<{ term: string; frequency: number; importance: number; segmentIds: string[] }> {
+  limit = 12,
+): Array<{
+  term: string;
+  frequency: number;
+  importance: number;
+  segmentIds: string[];
+  context: string;
+  timestamp: string;
+}> {
   const stopWords = new Set([
     "في",
     "من",
     "على",
+    "الي",
     "إلى",
     "عن",
     "مع",
     "هذا",
     "هذه",
     "ذلك",
+    "تلك",
     "تم",
     "كان",
+    "كانت",
     "يكون",
+    "تكون",
     "كل",
     "هو",
     "هي",
     "نحن",
+    "احنا",
+    "انت",
+    "ان",
     "أن",
     "إن",
     "هل",
     "ما",
     "التي",
     "الذي",
+    "اللي",
     "بين",
     "عند",
+    "بعد",
+    "قبل",
+    "عشان",
+    "علشان",
+    "يعني",
+    "جدا",
+    "جداً",
+    "كده",
+    "ده",
+    "دي",
+    "النهارده",
+    "النهاردة",
+    "اليوم",
     "the",
     "and",
     "for",
@@ -82,30 +142,56 @@ export function extractKeywordsWithFrequency(
     "their",
     "what",
     "when",
+    "then",
+    "than",
+    "also",
+    "just",
+    "very",
+    "some",
+    "more",
+    "been",
+    "being",
+    "here",
+    "there",
   ]);
-  const counts = new Map<string, { freq: number; segIds: Set<string> }>();
+  const counts = new Map<
+    string,
+    { display: string; freq: number; segIds: Set<string>; context: string; timestamp: string }
+  >();
   for (const seg of segments) {
     const tokens = (seg.text || "").split(/\s+/);
+    const ts = formatMmSs(seg.startTime || 0);
     for (const raw of tokens) {
-      const clean = raw.replace(/[^ء-يa-zA-Z0-9_-]/g, "");
-      const norm = clean.toLowerCase();
-      if (clean.length >= 3 && !stopWords.has(norm)) {
-        const entry = counts.get(clean) || { freq: 0, segIds: new Set<string>() };
+      const clean = raw.replace(/^[^ء-يa-zA-Z0-9.#+-]+|[^ء-يa-zA-Z0-9.#+-]+$/g, "");
+      const norm = normalizeArabicAndLatin(clean);
+      const isShortTech = /^(ai|ml|ui|ux|db|os|ip|ci|cd|c#|js|ts|\.net|api|sql|jwt|sse|rag)$/i.test(
+        clean,
+      );
+      if ((clean.length >= 3 || isShortTech) && norm && !stopWords.has(norm)) {
+        const entry = counts.get(norm) || {
+          display: clean,
+          freq: 0,
+          segIds: new Set<string>(),
+          context: seg.text.length > 140 ? `${seg.text.slice(0, 140)}...` : seg.text,
+          timestamp: ts,
+        };
         entry.freq += 1;
         entry.segIds.add(seg.id);
-        counts.set(clean, entry);
+        counts.set(norm, entry);
       }
     }
   }
-  const sorted = Array.from(counts.entries())
-    .sort((a, b) => b[1].freq - a[1].freq)
+  const sorted = Array.from(counts.values())
+    .sort((a, b) => b.freq - a.freq)
     .slice(0, limit);
-  const maxFreq = Math.max(1, sorted[0]?.[1].freq || 1);
-  return sorted.map(([term, info]) => ({
-    term,
+  const maxFreq = Math.max(1, sorted[0]?.freq || 1);
+  return sorted.map((info) => ({
+    term: info.display,
     frequency: info.freq,
     importance: Math.round((info.freq / maxFreq) * 100) / 100,
     segmentIds: Array.from(info.segIds),
+    context: info.context,
+    timestamp: info.timestamp,
   }));
 }
 
@@ -119,24 +205,31 @@ export function extractHighlightsFromSegments(segments: TranscriptSegment[]): Ar
 }> {
   const cues: Array<{ regex: RegExp; category: string; priority: string }> = [
     {
-      regex: /(important|critical|exam|remember|key|note|مهم|امتحان|انتبه|أساسي|تذكر)/i,
+      regex:
+        /(important|critical|exam|remember|key takeaway|focus here|مهم|مهمة|دي مهمة|ركزوا|ركز هنا|امتحان|ممكن تيجي|الخلاصة|انتبه|أساسي|تذكر|نقطة جوهرية)/i,
       category: "ExamTip",
       priority: "high",
     },
     {
-      regex: /(decide|decision|agreed|approved|قرر|اتفق|اعتماد)/i,
+      regex: /(decide|decision|agreed|approved|finalized|قرر|قررنا|اتفق|اتفقنا|اعتماد|تم الاتفاق)/i,
       category: "Decision",
       priority: "high",
     },
     {
-      regex: /(warning|risk|danger|careful|تحذير|خطر|مشكلة)/i,
+      regex: /(warning|risk|danger|careful|blocker|issue|تحذير|خطر|مشكلة|عائق|انتباه)/i,
       category: "Warning",
       priority: "high",
     },
     {
-      regex: /(defined as|means|definition|يعني|تعريف|المقصود)/i,
+      regex: /(defined as|means|definition|refers to|يعني|تعريف|المقصود|عبارة عن)/i,
       category: "Definition",
       priority: "medium",
+    },
+    {
+      regex:
+        /(action item|todo|deadline|deliver|submit|responsible|assign|مهمة|تسليم|مطلوب|مسؤول|لازم نخلص|موعد)/i,
+      category: "ActionItem",
+      priority: "high",
     },
   ];
   const results: Array<{
@@ -149,13 +242,12 @@ export function extractHighlightsFromSegments(segments: TranscriptSegment[]): Ar
   }> = [];
 
   for (const seg of segments) {
-    const mins = Math.floor((seg.startTime || 0) / 60);
-    const secs = Math.floor((seg.startTime || 0) % 60);
-    const ts = `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+    const ts = formatMmSs(seg.startTime || 0);
     for (const cue of cues) {
       if (cue.regex.test(seg.text || "")) {
         results.push({
           quote: seg.text,
+          context: `Spoken by ${seg.speaker} at [${ts}]`,
           speaker: seg.speaker,
           timestamp: ts,
           category: cue.category,
@@ -164,7 +256,7 @@ export function extractHighlightsFromSegments(segments: TranscriptSegment[]): Ar
         break;
       }
     }
-    if (results.length >= 6) break;
+    if (results.length >= 10) break;
   }
   return results;
 }
@@ -237,8 +329,9 @@ async function prepareTranscriptForLlm(
   for (let idx = 0; idx < chunks.length; idx++) {
     try {
       const resp = await ai.models.generateContent({
-        model: "gemini-3.1-flash-lite",
+        model: TEXT_MODEL,
         contents: `Extract all key facts, definitions, technical terms, decisions, tasks, speakers, and timestamps from part ${idx + 1}/${chunks.length} of "${title}". Be faithful to the transcript and omit nothing important:\n\n${chunks[idx]}`,
+        config: { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } },
       });
       const text = (resp.text || "").trim();
       if (text) {
@@ -251,6 +344,97 @@ async function prepareTranscriptForLlm(
   return chunkSummaries.join("\n\n").slice(0, maxDirectChars);
 }
 
+/**
+ * Normalizes non-WAV live audio chunks (e.g. browser WebM/Opus, OGG, MP4/M4A)
+ * into clean 16kHz mono PCM WAV via ffmpeg when available so Gemini ASR receives
+ * an unambiguous, container-valid audio clip.
+ */
+async function normalizeLiveAudioChunkToWav(
+  audioBytes: Buffer,
+  mimeType: string,
+): Promise<{ bytes: Buffer; mimeType: string }> {
+  const safeMime = (mimeType || "audio/webm").split(";")[0].trim().toLowerCase();
+  // Already clean WAV or MP3 — pass straight through with zero overhead
+  if (
+    (safeMime === "audio/wav" || safeMime === "audio/x-wav" || safeMime === "audio/wave") &&
+    audioBytes.length > 44 &&
+    audioBytes.subarray(0, 4).toString("ascii") === "RIFF"
+  ) {
+    return { bytes: audioBytes, mimeType: "audio/wav" };
+  }
+  if (safeMime === "audio/mp3" || safeMime === "audio/mpeg") {
+    return { bytes: audioBytes, mimeType: "audio/mp3" };
+  }
+
+  const ext = safeMime.includes("ogg")
+    ? ".ogg"
+    : safeMime.includes("mp4") || safeMime.includes("m4a") || safeMime.includes("aac")
+      ? ".m4a"
+      : safeMime.includes("flac")
+        ? ".flac"
+        : ".webm";
+
+  const id = `${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+  const inPath = path.join(os.tmpdir(), `mm_live_in_${id}${ext}`);
+  const outPath = path.join(os.tmpdir(), `mm_live_out_${id}.wav`);
+
+  try {
+    fs.writeFileSync(inPath, audioBytes);
+    await execFileAsync(
+      "ffmpeg",
+      [
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-err_detect",
+        "ignore_err",
+        "-fflags",
+        "+genpts+igndts+discardcorrupt",
+        "-i",
+        inPath,
+        "-vn",
+        "-acodec",
+        "pcm_s16le",
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        outPath,
+      ],
+      { timeout: 20000, maxBuffer: 4 * 1024 * 1024 },
+    );
+
+    if (fs.existsSync(outPath) && fs.statSync(outPath).size > 1024) {
+      return { bytes: fs.readFileSync(outPath), mimeType: "audio/wav" };
+    }
+  } catch {
+    // If ffmpeg is unavailable or chunk is already raw-readable by Gemini, pass original bytes
+  } finally {
+    try {
+      if (fs.existsSync(inPath)) fs.unlinkSync(inPath);
+    } catch {
+      /* ignore */
+    }
+    try {
+      if (fs.existsSync(outPath)) fs.unlinkSync(outPath);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return { bytes: audioBytes, mimeType: safeMime || "audio/webm" };
+}
+
+function detectLanguageLabelFromText(text: string, hint: string): string {
+  const ar = (text.match(/[\u0600-\u06FF]/g) || []).length;
+  const en = (text.match(/[a-zA-Z]/g) || []).length;
+  if (ar > 4 && en > 4) return "Mixed (AR/EN)";
+  if (ar > 0) return hint === "ar-SA" ? "العربية الفصحى" : "العربية (Arabic)";
+  if (en > 0) return "English";
+  return hint === "auto" ? "Auto-Detect" : hint;
+}
+
 export async function transcribeAndTranslateAudioChunk(params: {
   audioBase64?: string;
   mimeType?: string;
@@ -259,173 +443,216 @@ export async function transcribeAndTranslateAudioChunk(params: {
   language?: string;
   offsetSeconds?: number;
   isMeeting?: boolean;
-}): Promise<{ arabicText: string; text: string; detectedLanguage: string }> {
+}): Promise<{
+  arabicText: string;
+  text: string;
+  detectedLanguage: string;
+  isSilence?: boolean;
+  error?: string;
+  retryable?: boolean;
+}> {
   const {
     audioBase64,
     mimeType = "audio/webm",
-    interimText,
     recentContext,
     language = "auto",
     offsetSeconds = 0,
     isMeeting = false,
   } = params;
 
-  // 1. Prefer Python FastAPI whisper/audio service when configured and audio bytes exist
-  if (AI_SERVICE_URL && audioBase64 && audioBase64.length > 64) {
-    try {
-      const audioBytes = Buffer.from(audioBase64, "base64");
-      if (audioBytes.length > 100) {
-        const safeMime = mimeType.split(";")[0].trim() || "audio/webm";
-        const ext = safeMime.includes("wav")
-          ? ".wav"
-          : safeMime.includes("mp4") || safeMime.includes("m4a")
-            ? ".m4a"
-            : safeMime.includes("ogg")
-              ? ".ogg"
-              : ".webm";
-        const form = new FormData();
-        form.append("file", new Blob([audioBytes], { type: safeMime }), `live_chunk${ext}`);
-        form.append("language", language || "auto");
-        form.append("is_meeting", isMeeting ? "true" : "false");
-        form.append("offset_seconds", String(offsetSeconds || 0));
-        form.append("is_partial", "true");
+  const rawAudioBytes =
+    audioBase64 && audioBase64.length > 64 ? Buffer.from(audioBase64, "base64") : null;
 
-        const resp = await fetch(`${AI_SERVICE_URL}/api/v1/transcribe-chunk`, {
-          method: "POST",
-          body: form,
-          signal: AbortSignal.timeout(25000),
-        });
-        if (resp.ok) {
-          const data = (await resp.json()) as {
-            detected_language?: string;
-            full_text?: string;
-            segments?: Array<{ text?: string }>;
+  // 1. Prefer Python FastAPI whisper/audio service when configured and audio bytes exist
+  if (AI_SERVICE_URL && rawAudioBytes && rawAudioBytes.length > 100) {
+    try {
+      const safeMime = mimeType.split(";")[0].trim() || "audio/webm";
+      const ext = safeMime.includes("wav")
+        ? ".wav"
+        : safeMime.includes("mp4") || safeMime.includes("m4a")
+          ? ".m4a"
+          : safeMime.includes("ogg")
+            ? ".ogg"
+            : ".webm";
+      const form = new FormData();
+      form.append("file", new Blob([rawAudioBytes], { type: safeMime }), `live_chunk${ext}`);
+      form.append("language", language || "auto");
+      form.append("is_meeting", isMeeting ? "true" : "false");
+      form.append("offset_seconds", String(offsetSeconds || 0));
+      form.append("is_partial", "true");
+
+      const resp = await fetch(`${AI_SERVICE_URL}/api/v1/transcribe-chunk`, {
+        method: "POST",
+        body: form,
+        signal: AbortSignal.timeout(25000),
+      });
+      if (resp.ok) {
+        const data = (await resp.json()) as {
+          detected_language?: string;
+          full_text?: string;
+          segments?: Array<{ text?: string }>;
+        };
+        const segmentText = (data.segments || [])
+          .map((s) => (s.text || "").trim())
+          .filter(Boolean)
+          .join(" ")
+          .trim();
+        const finalTxt = segmentText || (data.full_text || "").trim();
+        if (finalTxt) {
+          return {
+            arabicText: finalTxt,
+            text: finalTxt,
+            detectedLanguage:
+              data.detected_language || detectLanguageLabelFromText(finalTxt, language),
           };
-          const segmentText = (data.segments || [])
-            .map((s) => (s.text || "").trim())
-            .filter(Boolean)
-            .join(" ")
-            .trim();
-          const finalTxt = segmentText || (data.full_text || "").trim();
-          if (finalTxt) {
-            return {
-              arabicText: finalTxt,
-              text: finalTxt,
-              detectedLanguage: data.detected_language || language || "auto",
-            };
-          }
         }
       }
     } catch {
-      // Fallback gracefully to Gemini ASR
+      // Fall through cleanly to Gemini real ASR
     }
   }
 
   const ai = getGeminiClient();
-
-  if (ai && audioBase64 && audioBase64.length > 64) {
-    try {
-      let safeMime = mimeType.split(";")[0].trim();
-      if (!safeMime || safeMime === "audio/webm") {
-        safeMime = "audio/webm";
-      }
-
-      const forceArabic = language === "ar-forced";
-      const langInstruction = forceArabic
-        ? "يجب أن يكون الناتج باللغة العربية الفصحى حصراً."
-        : language.startsWith("en")
-          ? "Transcribe faithfully verbatim in the spoken English language without changing to another language."
-          : "Transcribe faithfully verbatim in the original spoken language (Arabic, Egyptian Arabic, English, or mixed technical speech). Do NOT invent words.";
-
-      const promptText = `Transcribe this live audio clip verbatim.
-${langInstruction}
-Recent context: "${recentContext || "Live session start"}"
-Rules:
-1. Return ONLY the exact spoken words cleanly without speaker labels, timestamps, or commentary.
-2. If the audio clip contains only silence or noise with no speech, reply with exact token: [SILENCE]`;
-
-      let rawOutput = "";
-      try {
-        const response = await ai.models.generateContent({
-          model: "gemini-3.5-transcribe",
-          contents: {
-            parts: [
-              {
-                inlineData: {
-                  mimeType: safeMime,
-                  data: audioBase64,
-                },
-              },
-              {
-                text: promptText,
-              },
-            ],
-          },
-        });
-        rawOutput = extractGeminiTranscriptText(response);
-      } catch {
-        // Fall through to secondary multimodal ASR
-      }
-
-      if (!rawOutput) {
-        const fallbackResp = await ai.models.generateContent({
-          model: "gemini-3.1-flash-lite",
-          contents: {
-            parts: [
-              {
-                inlineData: {
-                  mimeType: safeMime,
-                  data: audioBase64,
-                },
-              },
-              {
-                text: promptText,
-              },
-            ],
-          },
-        });
-        rawOutput = extractGeminiTranscriptText(fallbackResp);
-      }
-
-      if (
-        rawOutput &&
-        !rawOutput.includes("[صمت]") &&
-        !rawOutput.toLowerCase().includes("[silence]")
-      ) {
-        const cleaned = rawOutput
-          .replace(/\b(English|Translation|Speaker|Arabic|Transcript):\s*/gi, "")
-          .trim();
-        if (cleaned.length > 0) {
-          return {
-            arabicText: cleaned,
-            text: cleaned,
-            detectedLanguage: language === "auto" ? "Auto-detected" : language,
-          };
-        }
-      }
-    } catch (geminiError) {
-      console.warn("Gemini live transcription warning:", geminiError);
-    }
-  }
-
-  // Only clean user-spoken WebSpeech interim text if provided; never fabricate text
-  if (interimText && interimText.trim()) {
-    const trimmed = interimText.trim();
+  if (!ai) {
     return {
-      arabicText: trimmed,
-      text: trimmed,
-      detectedLanguage: language || "Browser Speech",
+      arabicText: "",
+      text: "",
+      detectedLanguage: language || "auto",
+      error: "GEMINI_API_KEY is not configured for real-time speech transcription.",
+      retryable: false,
     };
   }
 
-  return {
-    arabicText: "",
-    text: "",
-    detectedLanguage: language || "auto",
-  };
+  if (!rawAudioBytes || rawAudioBytes.length < 100) {
+    return {
+      arabicText: "",
+      text: "",
+      detectedLanguage: language || "auto",
+      isSilence: true,
+    };
+  }
+
+  try {
+    const normalized = await normalizeLiveAudioChunkToWav(rawAudioBytes, mimeType);
+    const normalizedBase64 = normalized.bytes.toString("base64");
+
+    const langInstruction =
+      language === "ar-forced"
+        ? "Transcribe in Modern Standard Arabic while preserving exact English technical terms (API, Backend, .NET, React, Python, FastAPI, SignalR, SQL Server)."
+        : language.startsWith("en")
+          ? "Transcribe faithfully verbatim in English without translating to another language."
+          : language === "ar-EG"
+            ? "Transcribe faithfully verbatim in Arabic (Egyptian Arabic or MSA as spoken) and preserve any embedded English technical terms (API, Backend, .NET, React, Python, FastAPI, SignalR, SQL Server) exactly in English."
+            : "Auto-detect the spoken language (Arabic dialects including Egyptian/MSA/Gulf/Levantine, English, or mixed Arabic+English) and transcribe faithfully verbatim. Preserve embedded English technical terms without translating them.";
+
+    const contextHint = recentContext
+      ? `Previous spoken context (do NOT repeat this context, transcribe ONLY new speech in this clip): "${recentContext.slice(-220)}"`
+      : "Start of live recording session.";
+
+    const promptText = `Transcribe this real live microphone audio clip verbatim.
+${langInstruction}
+${contextHint}
+Strict rules:
+1. Return ONLY the exact words spoken in THIS audio clip with proper punctuation. No speaker labels, no timestamps, no explanations.
+2. NEVER invent, guess, or hallucinate words.
+3. If this audio clip contains only silence, breathing, or background noise with no intelligible human speech, reply with exact token: [SILENCE]`;
+
+    const audioPart = {
+      inlineData: {
+        mimeType: normalized.mimeType,
+        data: normalizedBase64,
+      },
+    };
+
+    let rawOutput = "";
+    let primaryErr: unknown = null;
+    try {
+      const response = await ai.models.generateContent({
+        model: ASR_MODEL,
+        contents: {
+          parts: [audioPart, { text: promptText }],
+        },
+      });
+      rawOutput = extractGeminiTranscriptText(response);
+    } catch (err) {
+      primaryErr = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/API_KEY_INVALID|API key not valid|PERMISSION_DENIED|403|401/i.test(msg)) {
+        throw err;
+      }
+    }
+
+    if (!rawOutput && primaryErr) {
+      // Secondary real multimodal pass only if dedicated ASR threw a transient/model error
+      const fallbackResp = await ai.models.generateContent({
+        model: TEXT_MODEL,
+        contents: {
+          parts: [audioPart, { text: promptText }],
+        },
+        config: { thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL } },
+      });
+      rawOutput = extractGeminiTranscriptText(fallbackResp);
+    }
+
+    const trimmed = (rawOutput || "").trim();
+    const isSilenceToken =
+      !trimmed ||
+      trimmed === "[صمت]" ||
+      trimmed === "[]" ||
+      trimmed.toLowerCase() === "[silence]" ||
+      trimmed.toLowerCase() === "silence";
+
+    if (isSilenceToken) {
+      return {
+        arabicText: "",
+        text: "",
+        detectedLanguage: language === "auto" ? "Auto-Detect" : language,
+        isSilence: true,
+      };
+    }
+
+    const cleaned = trimmed
+      .replace(/^```(?:text|txt)?\s*/i, "")
+      .replace(/\s*```$/i, "")
+      .replace(/^(English|Translation|Speaker|Arabic|Transcript):\s*/i, "")
+      .trim();
+
+    if (!cleaned || cleaned.toLowerCase().includes("[silence]") || cleaned === "[صمت]") {
+      return {
+        arabicText: "",
+        text: "",
+        detectedLanguage: language === "auto" ? "Auto-Detect" : language,
+        isSilence: true,
+      };
+    }
+
+    return {
+      arabicText: cleaned,
+      text: cleaned,
+      detectedLanguage: detectLanguageLabelFromText(cleaned, language),
+      isSilence: false,
+    };
+  } catch (geminiError) {
+    const msg = geminiError instanceof Error ? geminiError.message : String(geminiError);
+    console.warn("Gemini live transcription error:", msg);
+    const isAuthOrConfig = /API_KEY_INVALID|API key not valid|PERMISSION_DENIED|403|401/i.test(msg);
+    const isBillingDepleted =
+      /402|prepayment credits|credits are depleted|billing|PAYMENT_REQUIRED/i.test(msg);
+    return {
+      arabicText: "",
+      text: "",
+      detectedLanguage: language || "auto",
+      error: isBillingDepleted
+        ? "رصيد واجهة Gemini API منتهٍ في المشروع الحالي (HTTP 402). يرجى شحن الرصيد في AI Studio ثم إعادة المحاولة."
+        : isAuthOrConfig
+          ? "مفتاح Gemini API غير صالح أو غير مصرح به. يرجى التحقق من GEMINI_API_KEY في الإعدادات."
+          : `تعذر التفريغ الصوتي مؤقتاً: ${msg.slice(0, 180)}`,
+      retryable: !isAuthOrConfig && !isBillingDepleted,
+    };
+  }
 }
 
-// Generate Structured Arabic Summary strictly grounded in the transcript
+// Generate Structured Summary + Decisions + Action Items strictly grounded in the transcript
 export async function generateAiSummary(
   title: string,
   segments: TranscriptSegment[],
@@ -433,12 +660,15 @@ export async function generateAiSummary(
   courseCode?: string,
 ): Promise<{
   summary: string;
+  executiveSummary?: string;
+  detailedSummary?: string;
   keyPoints: string[];
   decisions: string[];
   actionItems: Array<{
     title: string;
     ownerName?: string;
     dueDate?: string;
+    sourceTimestamp?: string;
     priority: "high" | "medium" | "low";
   }>;
 }> {
@@ -459,88 +689,133 @@ export async function generateAiSummary(
       const isEnglish = detectedLang === "en";
       const prompt = isEnglish
         ? `You are the MeetMind AI ${type === "lecture" ? "Academic Study" : "Meeting Intelligence"} analyst.
-Summarize "${title}" ${courseCode ? `(Course: ${courseCode})` : ""} strictly based ONLY on the transcript below.
+Analyze "${title}" ${courseCode ? `(Course: ${courseCode})` : ""} strictly based ONLY on the transcript below.
 STRICT GROUNDING RULES:
-1. Do NOT invent any names, numbers, dates, tasks, or facts not explicitly in the transcript.
-2. Respond in clear professional English matching the recording.
+1. NEVER invent names, numbers, dates, tasks, decisions, or facts not explicitly stated in the transcript.
+2. For actionItems, if no responsible person is explicitly named in the transcript, set "ownerName" to "Not specified". If no deadline is stated, set "dueDate" to "Not specified".
+3. Preserve all English technical terms verbatim.
 
 Transcript:
 """
 ${preparedTranscript}
 """
 
-Format your Markdown summary with these headings:
-# Executive Summary
-## Key Points
-## Detailed Topics Discussed
-## Definitions & Key Terms
-## Decisions & Action Items
-## Highlighted Takeaways`
-        : `أنت المساعد الذكي الأكاديمي والمهني المتخصص في منصة MeetMind AI.
-مهمتك: تلخيص دقيق وشامل واحترافي لجلسة "${title}" ${courseCode ? `(مقرر: ${courseCode})` : ""} بناءً حصراً على النص المفرغ التالي.
-القاعدة الصارمة: لا تختلق أو تبتكر أي معلومات لم تذكر في النص المفرغ. يجب أن يكون كل بند مستنداً إلى ما قاله المتحدثون فعلياً.
-اكتب التلخيص باللغة العربية مع الحفاظ على المصطلحات التقنية الإنجليزية كما وردت.
+Return ONLY a valid JSON object matching this exact schema:
+{
+  "executiveSummary": "Concise 2-4 sentence executive overview grounded strictly in the transcript",
+  "detailedSummary": "Well-structured Markdown summary with headings (# Executive Summary, ## Key Points, ## Detailed Topics, ## Definitions & Terms, ## Decisions & Action Items, ## Highlighted Takeaways)",
+  "keyPoints": ["Grounded key point 1", "Grounded key point 2"],
+  "decisions": ["Explicit decision stated in transcript (empty array if none)"],
+  "actionItems": [
+    {
+      "title": "Exact task or commitment from transcript",
+      "ownerName": "Named person or Not specified",
+      "dueDate": "Stated deadline or Not specified",
+      "sourceTimestamp": "MM:SS",
+      "priority": "high"
+    }
+  ]
+}`
+        : `أنت المحلل الذكي المتخصص في منصة MeetMind AI.
+حلل ولخّص جلسة "${title}" ${courseCode ? `(مقرر: ${courseCode})` : ""} بناءً حصراً على النص المفرغ الفعلي التالي.
+القواعد الصارمة لمنع الاختلاق:
+1. لا تختلق أو تخمّن أي أسماء أو أرقام أو قرارات أو مهام أو حقائق لم تُذكر صراحة في النص المفرغ.
+2. في قائمة المهام (actionItems): إذا لم يُذكر اسم المسؤول صراحة اكتب "Not specified"، وإذا لم يُذكر موعد تسليم اكتب "Not specified".
+3. حافظ على المصطلحات التقنية الإنجليزية (مثل API و .NET و React و Python و FastAPI و SignalR و SQL Server) كما وردت بالضبط.
 
 النص المفرغ:
 """
 ${preparedTranscript}
 """
 
-المطلوب إخراج التلخيص بالهيكل المنظم التالي:
-# الفكرة العامة
-(فقرة مكثفة تلخص الهدف والمحور الأساسي للجلسة)
-
-## أهم النقاط
-(قائمة نقطية بأبرز الأفكار المطروحة)
-
-## شرح مختصر للموضوعات
-(شرح موجز ومنظم للمفاهيم التي نوقشت)
-
-## التعريفات والمصطلحات المهمة
-(أي مصطلحات أو تعريفات علمية أو تقنية وردت)
-
-## الأمثلة التي ذكرها المتحدث
-(الأمثلة الواقعية أو التوضيحية التي استشهد بها المتحدث)
-
-## القرارات والمهام إن وجدت
-(ما تم الاتفاق عليه أو تكليف المشاركين به)
-
-## النقاط التي أكد المتحدث على أهميتها
-(ما شدد عليه المحاضر/المتحدث وركز عليه بشدة)
-
-## الأسئلة والموضوعات المحتمل مراجعتها للامتحان
-(إذا كانت محاضرة تعليمية، استخلص النقاط المرشحة للمراجعة أو الأسئلة التي طرحها الطلاب أو المحاضر)`;
+أرجع كائن JSON صالحاً فقط بهذا الهيكل الدقيق:
+{
+  "executiveSummary": "ملخص تنفيذي مكثف من 2 إلى 4 جمل مستند حصراً للنص المفرغ",
+  "detailedSummary": "ملخص منسق بصيغة Markdown يحتوي على العناوين: # الفكرة العامة، ## أهم النقاط، ## شرح مختصر للموضوعات، ## التعريفات والمصطلحات المهمة، ## القرارات والمهام إن وجدت، ## النقاط التي أكد المتحدث على أهميتها",
+  "keyPoints": ["أهم نقطة مستخلصة من النص 1", "نقطة 2"],
+  "decisions": ["قرار صريح تم الاتفاق عليه في النص (أو مصفوفة فارغة إن لم يوجد)"],
+  "actionItems": [
+    {
+      "title": "المهمة أو المطلوب تنفيذه كما ورد في النص",
+      "ownerName": "اسم الشخص المذكور أو Not specified",
+      "dueDate": "الموعد المذكور أو Not specified",
+      "sourceTimestamp": "MM:SS",
+      "priority": "high"
+    }
+  ]
+}`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-3.1-flash-lite",
+        model: TEXT_MODEL,
         contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        },
       });
 
-      const summaryText = response.text?.trim() || "";
-      if (summaryText) {
-        const keyPoints: string[] = [];
-        const lines = summaryText.split("\n");
-        let capturing = false;
-        for (const line of lines) {
-          if (line.includes("أهم النقاط") || line.includes("Key Points")) {
-            capturing = true;
-            continue;
-          }
-          if (capturing && line.startsWith("#")) {
-            break;
-          }
-          if (capturing && (line.trim().startsWith("-") || line.trim().startsWith("*"))) {
-            keyPoints.push(line.replace(/^[-*]\s*/, "").trim());
-          }
-        }
-
-        return {
-          summary: summaryText,
-          keyPoints:
-            keyPoints.length > 0 ? keyPoints.slice(0, 6) : segments.slice(0, 4).map((s) => s.text),
-          decisions: [],
-          actionItems: [],
+      const rawText = (response.text || "")
+        .replace(/^```(?:json)?\s*/i, "")
+        .replace(/\s*```$/i, "")
+        .trim();
+      if (rawText) {
+        const parsed = JSON.parse(rawText) as {
+          executiveSummary?: string;
+          detailedSummary?: string;
+          keyPoints?: unknown[];
+          decisions?: unknown[];
+          actionItems?: Array<{
+            title?: string;
+            ownerName?: string;
+            dueDate?: string;
+            sourceTimestamp?: string;
+            priority?: string;
+          }>;
         };
+
+        const detailed = String(parsed.detailedSummary || parsed.executiveSummary || "").trim();
+        const executive = String(parsed.executiveSummary || detailed).trim();
+        const keyPoints = Array.isArray(parsed.keyPoints)
+          ? parsed.keyPoints.map((x) => String(x || "").trim()).filter(Boolean)
+          : [];
+        const decisions = Array.isArray(parsed.decisions)
+          ? parsed.decisions.map((x) => String(x || "").trim()).filter(Boolean)
+          : [];
+        const actionItems = Array.isArray(parsed.actionItems)
+          ? parsed.actionItems
+              .filter((a) => a && typeof a.title === "string" && a.title.trim())
+              .map((a) => ({
+                title: a.title!.trim(),
+                ownerName:
+                  a.ownerName && String(a.ownerName).trim() && String(a.ownerName).trim() !== "null"
+                    ? String(a.ownerName).trim()
+                    : "Not specified",
+                dueDate:
+                  a.dueDate && String(a.dueDate).trim() && String(a.dueDate).trim() !== "null"
+                    ? String(a.dueDate).trim()
+                    : "Not specified",
+                sourceTimestamp: a.sourceTimestamp ? String(a.sourceTimestamp).trim() : undefined,
+                priority: (["high", "medium", "low"].includes(
+                  String(a.priority || "").toLowerCase(),
+                )
+                  ? String(a.priority).toLowerCase()
+                  : "medium") as "high" | "medium" | "low",
+              }))
+          : [];
+
+        if (detailed) {
+          return {
+            summary: detailed,
+            executiveSummary: executive,
+            detailedSummary: detailed,
+            keyPoints:
+              keyPoints.length > 0
+                ? keyPoints.slice(0, 8)
+                : segments.slice(0, 4).map((s) => s.text),
+            decisions,
+            actionItems,
+          };
+        }
       }
     } catch (err) {
       console.warn("Gemini summary error, falling back to grounded extractor:", err);
@@ -548,28 +823,30 @@ ${preparedTranscript}
   }
 
   // Grounded Extractive Fallback (Strictly derived from actual transcript segments — no generic invented filler)
-  const keywords = extractKeywordsWithFrequency(segments, 5).map((k) => k.term);
-  const bulletLines = segments.slice(0, 5).map(
-    (s) =>
-      `- [${Math.floor(s.startTime / 60)
-        .toString()
-        .padStart(2, "0")}:${Math.floor(s.startTime % 60)
-        .toString()
-        .padStart(2, "0")}] ${s.speaker}: ${s.text}`,
-  );
+  const keywords = extractKeywordsWithFrequency(segments, 6).map((k) => k.term);
+  const bulletLines = segments
+    .slice(0, 5)
+    .map((s) => `- [${formatMmSs(s.startTime)}] ${s.speaker}: ${s.text}`);
   const highlights = extractHighlightsFromSegments(segments);
   const extractedTasks: Array<{
     title: string;
     ownerName?: string;
     dueDate?: string;
+    sourceTimestamp?: string;
     priority: "high" | "medium" | "low";
   }> = [];
 
   for (const s of segments) {
-    if (/(action item|todo|must |need to|deadline|assign|يجب|سوف|تكليف|مهمة|تنفيذ)/i.test(s.text)) {
+    if (
+      /(action item|todo|must |need to|deadline|assign|deliver|submit|يجب|سوف|لازم|تكليف|مهمة|تسليم|تنفيذ)/i.test(
+        s.text,
+      )
+    ) {
       extractedTasks.push({
         title: s.text.length > 120 ? `${s.text.slice(0, 120)}...` : s.text,
-        dueDate: "Deadline not specified.",
+        ownerName: "Not specified",
+        dueDate: "Not specified",
+        sourceTimestamp: formatMmSs(s.startTime),
         priority: /(urgent|high|critical|فوري|عاجل|مهم)/i.test(s.text) ? "high" : "medium",
       });
       if (extractedTasks.length >= 5) break;
@@ -588,13 +865,123 @@ ${preparedTranscript}
 
   return {
     summary,
+    executiveSummary: segments[0]?.text || summary,
+    detailedSummary: summary,
     keyPoints: segments.slice(0, 4).map((s) => s.text),
     decisions: highlights.filter((h) => h.category === "Decision").map((h) => h.quote),
     actionItems: extractedTasks,
   };
 }
 
-// Generate Quiz directly grounded in the transcript and summary
+/**
+ * Verifies that a generated quiz question is genuinely grounded in the actual
+ * transcript text. Rejects hallucinated questions whose evidence/answer terms
+ * do not appear in the canonical transcript.
+ */
+export function verifyQuizQuestionGrounding(
+  question: {
+    question: string;
+    type?: string;
+    options?: string[];
+    correctOptionIndex?: number;
+    correctAnswerText?: string;
+    explanation?: string;
+    sourceTranscriptSegment?: string;
+  },
+  segments: TranscriptSegment[],
+): { grounded: boolean; matchedSegmentText?: string; matchedTimestamp?: string } {
+  if (!segments || segments.length === 0) return { grounded: false };
+
+  const normalizedSegments = segments.map((s) => ({
+    raw: s,
+    norm: normalizeArabicAndLatin(s.text),
+    tokens: new Set(
+      normalizeArabicAndLatin(s.text)
+        .split(" ")
+        .filter((t) => t.length >= 2),
+    ),
+  }));
+  const fullNormTranscript = normalizedSegments.map((s) => s.norm).join(" ");
+  const fullTokenSet = new Set<string>();
+  for (const s of normalizedSegments) {
+    for (const t of s.tokens) fullTokenSet.add(t);
+  }
+
+  // 1. Check direct evidence quote (`sourceTranscriptSegment`) if provided
+  if (question.sourceTranscriptSegment && question.sourceTranscriptSegment.trim().length >= 6) {
+    const quoteNorm = normalizeArabicAndLatin(question.sourceTranscriptSegment);
+    if (
+      quoteNorm &&
+      fullNormTranscript.includes(quoteNorm.slice(0, Math.min(28, quoteNorm.length)))
+    ) {
+      const hit = normalizedSegments.find(
+        (s) => s.norm.includes(quoteNorm.slice(0, 20)) || quoteNorm.includes(s.norm.slice(0, 20)),
+      );
+      return {
+        grounded: true,
+        matchedSegmentText: hit?.raw.text || question.sourceTranscriptSegment,
+        matchedTimestamp: hit ? formatMmSs(hit.raw.startTime) : undefined,
+      };
+    }
+
+    const quoteTokens = quoteNorm.split(" ").filter((t) => t.length >= 3);
+    if (quoteTokens.length >= 2) {
+      const matched = quoteTokens.filter((t) => fullTokenSet.has(t));
+      if (matched.length / quoteTokens.length >= 0.45) {
+        const bestSeg = normalizedSegments
+          .map((s) => ({
+            s,
+            score: quoteTokens.filter((t) => s.tokens.has(t)).length,
+          }))
+          .sort((a, b) => b.score - a.score)[0];
+        return {
+          grounded: true,
+          matchedSegmentText: bestSeg?.s.raw.text || question.sourceTranscriptSegment,
+          matchedTimestamp: bestSeg ? formatMmSs(bestSeg.s.raw.startTime) : undefined,
+        };
+      }
+    }
+  }
+
+  // 2. Fallback verification: verify factual tokens in answer + question + explanation against transcript
+  const selectedOption =
+    Array.isArray(question.options) &&
+    typeof question.correctOptionIndex === "number" &&
+    question.options[question.correctOptionIndex]
+      ? question.options[question.correctOptionIndex]
+      : "";
+  const probeText = `${question.correctAnswerText || ""} ${selectedOption} ${question.question || ""} ${question.explanation || ""}`;
+  const probeTokens = normalizeArabicAndLatin(probeText)
+    .split(" ")
+    .filter((t) => t.length >= 3);
+
+  if (probeTokens.length === 0) return { grounded: false };
+
+  let bestSeg = normalizedSegments[0];
+  let bestScore = 0;
+  let totalMatched = 0;
+  const uniqueProbe = Array.from(new Set(probeTokens));
+  for (const t of uniqueProbe) {
+    if (fullTokenSet.has(t)) totalMatched++;
+  }
+  for (const seg of normalizedSegments) {
+    const score = uniqueProbe.filter((t) => seg.tokens.has(t)).length;
+    if (score > bestScore) {
+      bestScore = score;
+      bestSeg = seg;
+    }
+  }
+
+  const grounded =
+    bestScore >= 2 || (totalMatched >= 2 && totalMatched / uniqueProbe.length >= 0.2);
+  return {
+    grounded,
+    matchedSegmentText: grounded ? bestSeg?.raw.text : undefined,
+    matchedTimestamp: grounded && bestSeg ? formatMmSs(bestSeg.raw.startTime) : undefined,
+  };
+}
+
+// Generate Quiz directly grounded in the transcript and summary (with automated grounding validation)
 export async function generateAiQuiz(
   title: string,
   segments: TranscriptSegment[],
@@ -620,6 +1007,9 @@ export async function generateAiQuiz(
     difficulty: "easy" | "medium" | "hard";
     sectionRef: string;
     timestampRef?: string;
+    sourceReference?: string;
+    sourceTranscriptSegment?: string;
+    groundingVerified?: boolean;
   }>;
 }> {
   const detectedLang = detectTranscriptLanguage(title, segments);
@@ -634,20 +1024,29 @@ export async function generateAiQuiz(
         detectedLang === "en"
           ? "Generate ALL questions, options, and explanations in clear English matching the transcript."
           : "أنشئ الأسئلة والخيارات والشروحات باللغة العربية مع الحفاظ على المصطلحات التقنية كما وردت.";
+      const totalWords = segments
+        .map((s) => s.text)
+        .join(" ")
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean).length;
+      const targetQuestionRange = totalWords < 40 ? "2 to 4" : "5 to 8";
+
       const prompt = `أنت بروفيسور وخبير تقييم أكاديمي في منصة MeetMind AI.
-المهمة الصارمة: أنشئ اختباراً شاملاً ومتنوعاً من 6 إلى 8 أسئلة يغطي كامل أجزاء المحاضرة/الاجتماع: "${title}" (البداية، المنتصف، الخاتمة والتطبيقات).
+المهمة الصارمة: أنشئ اختباراً موثقاً من ${targetQuestionRange} أسئلة يغطي المحتوى الفعلي فقط لجلسة: "${title}".
 ${langDirective}
 
-القواعد الأكاديمية الصارمة:
-1. الأسئلة مستندة بنسبة 100% إلى النص المفرغ الفعلي دون أي اختلاق.
-2. نوع في أنواع الأسئلة الأربعة لتشمل:
-   - "multiple_choice" (اختيار من متعدد بأربعة خيارات دقيقة)
-   - "true_false" (صح وخطأ، الخيارات ["True", "False"] أو ["صح (صواب)", "خطأ"])
-   - "fill_in_the_blank" (أكمل الفراغ: السؤال يحتوي على فراغ "___" والإجابة الصحيحة كلمة أو مصطلح دقيق)
-   - "short_answer" (سؤال مقالي تحليلي قصير مع نموذج إجابة وشرح استدلالي)
-3. نوع في مستويات الصعوبة: "easy"، "medium"، "hard".
-4. حدد القسم والزمن الفعلي (sectionRef، timestampRef).
-5. ${avoidList ? `تجنب تكرار هذه الأسئلة التي طُرحت سابقاً: ${avoidList}` : `هذا الإصدار ${variant} من الاختبار.`}
+القواعد الصارمة لمنع الاختلاق (ZERO HALLUCINATION):
+1. كل سؤال وإجابته الصحيحة يجب أن يستندا بنسبة 100% إلى حقيقة مذكورة صراحةً في النص المفرغ أدناه.
+2. إذا كان النص المفرغ قصيراً فلا تخترع أسئلة إضافية من خارج النص — اكتفِ بعدد الأسئلة التي يدعمها النص فعلياً فقط.
+3. أدرج لكل سؤال الحقل "sourceTranscriptSegment" بنص حرفي مقتبس مباشرة من النص المفرغ يثبت الإجابة الصحيحة.
+4. نوع بين أنواع الأسئلة:
+   - "multiple_choice" (أربعة خيارات دقيقة)
+   - "true_false" (الخيارات ["True", "False"] أو ["صح (صواب)", "خطأ"])
+   - "fill_in_the_blank" (جملة من النص فيها فراغ "___" والإجابة مصطلح ورد في النص)
+   - "short_answer" (سؤال قصير إجابته مباشرة من النص)
+5. حدد القسم والزمن الفعلي (sectionRef، timestampRef).
+6. ${avoidList ? `تجنب تكرار هذه الأسئلة التي طُرحت سابقاً: ${avoidList}` : `هذا الإصدار ${variant} من الاختبار.`}
 
 النص المفرغ:
 """
@@ -659,7 +1058,7 @@ ${preparedTranscript}
 ${summaryText || ""}
 """
 
-المطلوب إرجاع مصفوفة JSON فقط بالشكل التالي:
+أرجع مصفوفة JSON فقط بالشكل التالي:
 [
   {
     "question": "...",
@@ -671,65 +1070,93 @@ ${summaryText || ""}
     "explanation": "...",
     "difficulty": "medium",
     "sectionRef": "...",
-    "timestampRef": "02:15"
+    "timestampRef": "00:15",
+    "sourceTranscriptSegment": "exact verbatim quote from transcript"
   }
 ]`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-3.1-flash-lite",
+        model: TEXT_MODEL,
         contents: prompt,
         config: {
           responseMimeType: "application/json",
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
         },
       });
 
-      const jsonStr = (response.text || "").trim();
+      const jsonStr = (response.text || "")
+        .replace(/^```(?:json)?\s*/i, "")
+        .replace(/\s*```$/i, "")
+        .trim();
       const parsed = JSON.parse(jsonStr);
-      if (Array.isArray(parsed) && parsed.length >= 3) {
-        return {
-          title:
-            detectedLang === "en"
-              ? `Comprehension Quiz (${variant > 1 ? `Variant ${variant}` : "Main"}): ${title}`
-              : `اختبار الفهم الشامل (${variant > 1 ? `النموذج ${variant}` : "النموذج الرئيسي"}): ${title}`,
-          courseCode,
-          questions: parsed.map((q, idx) => ({
-            id: `q_${Date.now()}_${idx + 1}`,
-            question: q.question,
-            type:
-              q.type ||
-              (idx % 4 === 0
-                ? "multiple_choice"
-                : idx % 4 === 1
-                  ? "true_false"
-                  : idx % 4 === 2
-                    ? "fill_in_the_blank"
-                    : "short_answer"),
-            options:
-              Array.isArray(q.options) && q.options.length > 0
-                ? q.options
-                : q.type === "true_false"
-                  ? detectedLang === "en"
-                    ? ["True", "False"]
-                    : ["صح (صواب)", "خطأ"]
-                  : [],
-            correctOptionIndex: typeof q.correctOptionIndex === "number" ? q.correctOptionIndex : 0,
-            correctAnswerText:
-              q.correctAnswerText || (q.options ? q.options[q.correctOptionIndex || 0] : undefined),
-            acceptableAnswers: Array.isArray(q.acceptableAnswers) ? q.acceptableAnswers : [],
-            explanation:
-              q.explanation ||
-              (detectedLang === "en"
-                ? "Directly verified from the recorded transcript."
-                : "الإجابة مستخلصة وموثقة مباشرة من نص المحاضرة المسجل."),
-            difficulty: (["easy", "medium", "hard"].includes(q.difficulty)
-              ? q.difficulty
-              : "medium") as "easy" | "medium" | "hard",
-            sectionRef:
-              q.sectionRef || (detectedLang === "en" ? "Transcript Section" : "محاور الجلسة"),
-            timestampRef: q.timestampRef || "00:00",
-            sourceReference: `${q.sectionRef || "Transcript"} [${q.timestampRef || "00:00"}]`,
-          })),
-        };
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        const verifiedQuestions = parsed
+          .map((q, idx) => {
+            const verification = verifyQuizQuestionGrounding(q, segments);
+            if (!verification.grounded) return null;
+            const resolvedTs = q.timestampRef || verification.matchedTimestamp || "00:00";
+            const resolvedQuote =
+              q.sourceTranscriptSegment || verification.matchedSegmentText || "";
+            return {
+              id: `q_${Date.now()}_${idx + 1}`,
+              question: String(q.question || "").trim(),
+              type: ([
+                "multiple_choice",
+                "true_false",
+                "fill_in_the_blank",
+                "short_answer",
+              ].includes(q.type)
+                ? q.type
+                : idx % 4 === 0
+                  ? "multiple_choice"
+                  : idx % 4 === 1
+                    ? "true_false"
+                    : idx % 4 === 2
+                      ? "fill_in_the_blank"
+                      : "short_answer") as
+                "multiple_choice" | "true_false" | "short_answer" | "fill_in_the_blank",
+              options:
+                Array.isArray(q.options) && q.options.length > 0
+                  ? q.options.map((o: unknown) => String(o))
+                  : q.type === "true_false"
+                    ? detectedLang === "en"
+                      ? ["True", "False"]
+                      : ["صح (صواب)", "خطأ"]
+                    : [],
+              correctOptionIndex:
+                typeof q.correctOptionIndex === "number" ? q.correctOptionIndex : 0,
+              correctAnswerText:
+                q.correctAnswerText ||
+                (q.options ? q.options[q.correctOptionIndex || 0] : undefined),
+              acceptableAnswers: Array.isArray(q.acceptableAnswers) ? q.acceptableAnswers : [],
+              explanation:
+                q.explanation ||
+                (detectedLang === "en"
+                  ? "Directly verified from the recorded transcript."
+                  : "الإجابة مستخلصة وموثقة مباشرة من نص الجلسة المسجل."),
+              difficulty: (["easy", "medium", "hard"].includes(q.difficulty)
+                ? q.difficulty
+                : "medium") as "easy" | "medium" | "hard",
+              sectionRef:
+                q.sectionRef || (detectedLang === "en" ? "Transcript Section" : "محاور الجلسة"),
+              timestampRef: resolvedTs,
+              sourceReference: `${q.sectionRef || "Transcript"} [${resolvedTs}]`,
+              sourceTranscriptSegment: resolvedQuote,
+              groundingVerified: true,
+            };
+          })
+          .filter((item): item is NonNullable<typeof item> => Boolean(item && item.question));
+
+        if (verifiedQuestions.length > 0) {
+          return {
+            title:
+              detectedLang === "en"
+                ? `Comprehension Quiz (${variant > 1 ? `Variant ${variant}` : "Main"}): ${title}`
+                : `اختبار الفهم الشامل (${variant > 1 ? `النموذج ${variant}` : "النموذج الرئيسي"}): ${title}`,
+            courseCode,
+            questions: verifiedQuestions,
+          };
+        }
       }
     } catch (e) {
       console.warn("Gemini quiz generation error, using grounded generator:", e);
@@ -782,6 +1209,9 @@ ${summaryText || ""}
           difficulty: "easy",
           sectionRef: "Opening",
           timestampRef: formatTimeStr(seg0.startTime),
+          sourceReference: `Opening [${formatTimeStr(seg0.startTime)}]`,
+          sourceTranscriptSegment: seg0.text,
+          groundingVerified: true,
         },
         {
           id: `q_tf_1`,
@@ -794,6 +1224,9 @@ ${summaryText || ""}
           difficulty: "easy",
           sectionRef: "Core Discussion",
           timestampRef: formatTimeStr(segMid.startTime),
+          sourceReference: `Core Discussion [${formatTimeStr(segMid.startTime)}]`,
+          sourceTranscriptSegment: segMid.text,
+          groundingVerified: true,
         },
         {
           id: `q_fill_1`,
@@ -807,6 +1240,9 @@ ${summaryText || ""}
           difficulty: "medium",
           sectionRef: "Key Terminology",
           timestampRef: formatTimeStr(segQuarter.startTime),
+          sourceReference: `Key Terminology [${formatTimeStr(segQuarter.startTime)}]`,
+          sourceTranscriptSegment: segQuarter.text,
+          groundingVerified: true,
         },
         {
           id: `q_sa_1`,
@@ -819,6 +1255,9 @@ ${summaryText || ""}
           difficulty: "hard",
           sectionRef: "Closing",
           timestampRef: formatTimeStr(segLast.startTime),
+          sourceReference: `Closing [${formatTimeStr(segLast.startTime)}]`,
+          sourceTranscriptSegment: segLast.text,
+          groundingVerified: true,
         },
       ],
     };
@@ -844,6 +1283,9 @@ ${summaryText || ""}
         difficulty: "easy",
         sectionRef: "المقدمة والمنطلقات",
         timestampRef: formatTimeStr(seg0.startTime),
+        sourceReference: `المقدمة والمنطلقات [${formatTimeStr(seg0.startTime)}]`,
+        sourceTranscriptSegment: seg0.text,
+        groundingVerified: true,
       },
       {
         id: `q_tf_1`,
@@ -856,6 +1298,9 @@ ${summaryText || ""}
         difficulty: "easy",
         sectionRef: "الصلب النظري والمفاهيم",
         timestampRef: formatTimeStr(segMid.startTime),
+        sourceReference: `الصلب النظري والمفاهيم [${formatTimeStr(segMid.startTime)}]`,
+        sourceTranscriptSegment: segMid.text,
+        groundingVerified: true,
       },
       {
         id: `q_fill_1`,
@@ -869,6 +1314,9 @@ ${summaryText || ""}
         difficulty: "medium",
         sectionRef: "المصطلحات المحورية",
         timestampRef: formatTimeStr(segQuarter.startTime),
+        sourceReference: `المصطلحات المحورية [${formatTimeStr(segQuarter.startTime)}]`,
+        sourceTranscriptSegment: segQuarter.text,
+        groundingVerified: true,
       },
       {
         id: `q_mcq_2`,
@@ -888,6 +1336,9 @@ ${summaryText || ""}
         difficulty: "medium",
         sectionRef: "التطبيقات المتقدمة",
         timestampRef: formatTimeStr(segThreeQuarter.startTime),
+        sourceReference: `التطبيقات المتقدمة [${formatTimeStr(segThreeQuarter.startTime)}]`,
+        sourceTranscriptSegment: segThreeQuarter.text,
+        groundingVerified: true,
       },
       {
         id: `q_sa_1`,
@@ -900,6 +1351,9 @@ ${summaryText || ""}
         difficulty: "hard",
         sectionRef: "الخاتمة والتوصيات",
         timestampRef: formatTimeStr(segLast.startTime),
+        sourceReference: `الخاتمة والتوصيات [${formatTimeStr(segLast.startTime)}]`,
+        sourceTranscriptSegment: segLast.text,
+        groundingVerified: true,
       },
     ],
   };
@@ -958,9 +1412,12 @@ ${preparedTranscript}
 }`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-3.1-flash-lite",
+        model: TEXT_MODEL,
         contents: prompt,
-        config: { responseMimeType: "application/json" },
+        config: {
+          responseMimeType: "application/json",
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        },
       });
 
       const parsed = JSON.parse(response.text || "{}");
@@ -1326,6 +1783,41 @@ export async function askMeetMindAI({
     return emptyRes;
   }
 
+  // Helper: select all segments for short recordings, or top relevance-scored + boundary segments for long recordings
+  const selectTranscriptSegmentsForChat = (segs: TranscriptSegment[], limit = 80) => {
+    if (segs.length <= limit) return segs;
+    const qTokens = normalizeArabicAndLatin(question)
+      .split(" ")
+      .filter((t) => t.length >= 2);
+    const chosen = new Set<number>();
+    // Always include opening and closing context
+    for (let i = 0; i < Math.min(10, segs.length); i++) chosen.add(i);
+    for (let i = Math.max(0, segs.length - 10); i < segs.length; i++) chosen.add(i);
+
+    const scored = segs
+      .map((s, idx) => {
+        const norm = normalizeArabicAndLatin(s.text);
+        let score = 0;
+        for (const t of qTokens) {
+          if (norm.includes(t)) score += t.length >= 4 ? 3 : 1;
+        }
+        return { idx, score };
+      })
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score);
+
+    for (const item of scored) {
+      if (chosen.size >= limit) break;
+      chosen.add(item.idx);
+      if (item.idx > 0 && chosen.size < limit) chosen.add(item.idx - 1);
+      if (item.idx + 1 < segs.length && chosen.size < limit) chosen.add(item.idx + 1);
+    }
+
+    return Array.from(chosen)
+      .sort((a, b) => a - b)
+      .map((i) => segs[i]);
+  };
+
   // Build grounded transcript + metadata context (strictly scoped to authorized user recordings)
   let contextDetails = "";
   const lecturesToInclude = targetLecture
@@ -1341,21 +1833,20 @@ export async function askMeetMindAI({
       contextDetails += `Keywords: ${l.keywords.map((k) => k.term).join(", ")}\n`;
     }
     if (l.segments && l.segments.length > 0) {
-      contextDetails += `Transcript:\n`;
-      l.segments.slice(0, 60).forEach((s) => {
-        const mins = Math.floor(s.startTime / 60);
-        const secs = Math.floor(s.startTime % 60);
-        contextDetails += `[${mins}:${secs < 10 ? "0" : ""}${secs}] ${s.speaker}: ${s.text}\n`;
+      const picked = selectTranscriptSegmentsForChat(l.segments, targetLecture ? 120 : 40);
+      contextDetails += `Transcript (${picked.length}/${l.segments.length} segments):\n`;
+      picked.forEach((s) => {
+        contextDetails += `[${formatMmSs(s.startTime)}] ${s.speaker}: ${s.text}\n`;
       });
     }
     const relQuiz = quizzes.find((q) => q.lectureId === l.id);
     if (relQuiz && relQuiz.questions.length > 0) {
       contextDetails += `Generated Quiz Questions: ${relQuiz.questions
-        .slice(0, 5)
+        .slice(0, 6)
         .map((q) => q.question)
         .join(" | ")}\n`;
     }
-    const relCards = flashcards.filter((f) => f.lectureId === l.id).slice(0, 5);
+    const relCards = flashcards.filter((f) => f.lectureId === l.id).slice(0, 6);
     if (relCards.length > 0) {
       contextDetails += `Flashcards: ${relCards.map((c) => `${c.front} -> ${c.back}`).join(" | ")}\n`;
     }
@@ -1378,12 +1869,18 @@ export async function askMeetMindAI({
       contextDetails += `Decisions: ${m.decisions.join("; ")}\n`;
     }
     if (m.segments && m.segments.length > 0) {
-      contextDetails += `Transcript:\n`;
-      m.segments.slice(0, 60).forEach((s) => {
-        const mins = Math.floor(s.startTime / 60);
-        const secs = Math.floor(s.startTime % 60);
-        contextDetails += `[${mins}:${secs < 10 ? "0" : ""}${secs}] ${s.speaker}: ${s.text}\n`;
+      const picked = selectTranscriptSegmentsForChat(m.segments, targetMeeting ? 120 : 40);
+      contextDetails += `Transcript (${picked.length}/${m.segments.length} segments):\n`;
+      picked.forEach((s) => {
+        contextDetails += `[${formatMmSs(s.startTime)}] ${s.speaker}: ${s.text}\n`;
       });
+    }
+    const relQuiz = quizzes.find((q) => q.meetingId === m.id);
+    if (relQuiz && relQuiz.questions.length > 0) {
+      contextDetails += `Generated Quiz Questions: ${relQuiz.questions
+        .slice(0, 6)
+        .map((q) => q.question)
+        .join(" | ")}\n`;
     }
     contextDetails += `\n`;
   }
@@ -1436,27 +1933,14 @@ Rules:
       }
       promptParts.push(`[User Question]:\n${question}`);
 
-      let response;
-      try {
-        response = await ai.models.generateContent({
-          model: "gemini-3.1-flash-lite",
-          contents: promptParts.join("\n\n"),
-          config: { systemInstruction },
-        });
-      } catch (primaryErr) {
-        const msg = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
-        if (/API_KEY_INVALID|API key not valid|PERMISSION_DENIED|403|401/i.test(msg)) {
-          throw primaryErr;
-        }
-        response = await ai.models.generateContent({
-          model: "gemini-4-hydrogen",
-          contents: promptParts.join("\n\n"),
-          config: {
-            systemInstruction,
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          },
-        });
-      }
+      const response = await ai.models.generateContent({
+        model: TEXT_MODEL,
+        contents: promptParts.join("\n\n"),
+        config: {
+          systemInstruction,
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        },
+      });
 
       const replyText = (response.text || "").trim();
       if (replyText) {
@@ -1601,9 +2085,12 @@ ${summaryText || ""}
 ]`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-3.1-flash-lite",
+        model: TEXT_MODEL,
         contents: prompt,
-        config: { responseMimeType: "application/json" },
+        config: {
+          responseMimeType: "application/json",
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        },
       });
 
       const parsed = JSON.parse(response.text || "[]");
@@ -1686,9 +2173,12 @@ ${summaryText || ""}
 المطلوب إرجاع كائن JSON يمثل العقدة الجذرية بالهيكل الموضح.`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-3.1-flash-lite",
+        model: TEXT_MODEL,
         contents: prompt,
-        config: { responseMimeType: "application/json" },
+        config: {
+          responseMimeType: "application/json",
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        },
       });
 
       const parsed = JSON.parse(response.text || "{}");

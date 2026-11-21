@@ -1,5 +1,5 @@
-import { initializeApp, getApps, getApp, type FirebaseApp } from "firebase/app";
-import { getAuth, signInWithPopup, GoogleAuthProvider, signOut, type Auth } from "firebase/auth";
+import { initializeApp, getApps, getApp, type FirebaseApp } from "@firebase/app";
+import { getAuth, signInWithPopup, GoogleAuthProvider, signOut, type Auth } from "@firebase/auth";
 import firebaseAppletConfig from "../../firebase-applet-config.json";
 
 /**

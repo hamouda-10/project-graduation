@@ -17,7 +17,8 @@ import {
   Globe,
   Loader2,
   AlertCircle,
-  FileCheck,
+  RefreshCw,
+  ExternalLink,
 } from "lucide-react";
 import {
   Dialog,
@@ -29,7 +30,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { GlassCard } from "@/components/common/glass-card";
 import {
   Select,
   SelectContent,
@@ -38,7 +38,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useQueryClient } from "@tanstack/react-query";
-import { useLiveTranscription, LiveTranscriptSegment } from "@/hooks/use-live-transcription";
+import { useLiveTranscription } from "@/hooks/use-live-transcription";
+import { api } from "@/lib/api-client";
 import { toast } from "sonner";
 
 interface LiveArabicRecorderProps {
@@ -48,11 +49,19 @@ interface LiveArabicRecorderProps {
   onCompleted?: (resourceId: string, type: "meeting" | "lecture") => void;
 }
 
+type SessionCategory = "meeting" | "lecture" | "interview" | "general";
+
 function formatTimer(seconds: number): string {
   if (!Number.isFinite(seconds) || isNaN(seconds) || seconds < 0) return "00:00";
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
   return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 KB";
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
 export function LiveArabicRecorder({
@@ -61,23 +70,30 @@ export function LiveArabicRecorder({
   defaultType = "meeting",
   onCompleted,
 }: LiveArabicRecorderProps) {
-  const [type, setType] = useState<"meeting" | "lecture">(defaultType);
+  const [sessionCategory, setSessionCategory] = useState<SessionCategory>(defaultType);
+  const type: "meeting" | "lecture" = sessionCategory === "lecture" ? "lecture" : "meeting";
+
   const [title, setTitle] = useState(
     defaultType === "meeting" ? "جلسة عمل ومزامنة الأولويات" : "محاضرة الأنظمة الموزعة والتوافق",
   );
   const [courseCode, setCourseCode] = useState("CS 6410");
   const [speakerName, setSpeakerName] = useState("المتحدث 1");
   const [selectedLanguage, setSelectedLanguage] = useState<string>("auto");
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>("default");
   const [autoScroll, setAutoScroll] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [viewMode, setViewMode] = useState<"continuous" | "cards">("continuous");
   const [editingSegId, setEditingSegId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   const [isFinishing, setIsFinishing] = useState(false);
+  const [showClosePrompt, setShowClosePrompt] = useState(false);
+  const [completedResourceId, setCompletedResourceId] = useState<string | null>(null);
 
+  const transcriptContainerRef = useRef<HTMLDivElement | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
 
   const {
+    stateMachine,
     isRecording,
     isPaused,
     elapsedSeconds,
@@ -85,53 +101,167 @@ export function LiveArabicRecorder({
     interimText,
     detectedLanguage,
     isProcessingChunk,
+    recordingId,
     audioLevels,
+    error,
+    connectionStatus,
+    pendingChunksCount,
+    wordCount,
+    recoverableSession,
+    isRecovering,
+    canRetryFinalize,
+    audioDevices,
+    recordedAudioReview,
     startRecording,
     togglePause,
     stopRecording,
     cancelRecording,
     setSegments,
+    retryFailedChunks,
+    retryFinalize,
+    resumeRecoverableSession,
+    finalizeRecoverableSession,
+    dismissRecoverableSession,
+    clearRecordedAudioReview,
   } = useLiveTranscription({
     type,
     title,
     courseCode,
     speakerName,
     language: selectedLanguage,
+    selectedDeviceId,
     chunkDurationMs: 3500,
+    checkRecovery: open,
     onError: (err) => toast.error(err),
   });
 
-  // Auto-scroll when new segment arrives
+  // Smart Auto-Scroll: follow new segments unless user intentionally scrolled up
   useEffect(() => {
     if (autoScroll && transcriptEndRef.current) {
       transcriptEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
   }, [segments, interimText, autoScroll]);
 
+  const handleTranscriptScroll = () => {
+    const el = transcriptContainerRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distanceFromBottom > 60 && autoScroll) {
+      setAutoScroll(false);
+    } else if (distanceFromBottom <= 24 && !autoScroll) {
+      setAutoScroll(true);
+    }
+  };
+
   const queryClient = useQueryClient();
 
-  // Handle Save Session
-  const handleStopAndSave = async () => {
+  const invalidateAllWorkspaceQueries = () => {
+    queryClient.invalidateQueries({ queryKey: ["meetings"] });
+    queryClient.invalidateQueries({ queryKey: ["lectures"] });
+    queryClient.invalidateQueries({ queryKey: ["quizzes"] });
+    queryClient.invalidateQueries({ queryKey: ["flashcards"] });
+    queryClient.invalidateQueries({ queryKey: ["mindmaps"] });
+    queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    queryClient.invalidateQueries({ queryKey: ["notifications"] });
+    queryClient.invalidateQueries({ queryKey: ["dashboard-metrics"] });
+    queryClient.invalidateQueries({ queryKey: ["dashboardMetrics"] });
+    queryClient.invalidateQueries({ queryKey: ["reports"] });
+  };
+
+  // Handle Stop & Save Session (displays real Audio Player in modal so user can listen & download immediately)
+  const handleStopAndSave = async (closeAfterSave = false) => {
+    setShowClosePrompt(false);
     setIsFinishing(true);
-    toast.loading("جاري تجميع وحفظ النص العربي المفرغ والتحليل الذكي...", { id: "save-session" });
+    toast.loading("جاري تجميع الصوت وتفريغ المقاطع المتبقية وتشغيل التحليل الذكي الشامل...", {
+      id: "save-session",
+    });
 
     const result = await stopRecording();
     setIsFinishing(false);
 
     if (result.success && result.resourceId) {
-      queryClient.invalidateQueries({ queryKey: ["meetings"] });
-      queryClient.invalidateQueries({ queryKey: ["lectures"] });
-      queryClient.invalidateQueries({ queryKey: ["quizzes"] });
-      queryClient.invalidateQueries({ queryKey: ["notifications"] });
-
-      toast.success("تم حفظ وتوثيق الجلسة بنجاح في قاعدة البيانات!", { id: "save-session" });
-      onOpenChange(false);
-      if (onCompleted) {
-        onCompleted(result.resourceId, type);
+      setCompletedResourceId(result.resourceId);
+      invalidateAllWorkspaceQueries();
+      toast.success(
+        "تم حفظ الجلسة وتشغيل جميع مخرجات الذكاء الاصطناعي بنجاح! يمكنك الاستماع للتسجيل الآن.",
+        { id: "save-session" },
+      );
+      if (closeAfterSave) {
+        onOpenChange(false);
+        if (onCompleted) {
+          onCompleted(result.resourceId, type);
+        }
       }
     } else {
-      toast.error("تم إيقاف التسجيل ولكن تعذر إنشاء السجل تلقائياً", { id: "save-session" });
+      toast.error(
+        result.error ||
+          "تم إيقاف التسجيل ولكن تعذر إتمام التحليل. يمكنك الاستماع للتسجيل وإعادة المحاولة دون فقدانه.",
+        { id: "save-session" },
+      );
     }
+  };
+
+  const handleRetryFinalize = async () => {
+    setIsFinishing(true);
+    toast.loading("جاري إعادة محاولة الحفظ والتحليل الذكي...", { id: "save-session" });
+    const result = await retryFinalize();
+    setIsFinishing(false);
+    if (result.success && result.resourceId) {
+      setCompletedResourceId(result.resourceId);
+      invalidateAllWorkspaceQueries();
+      toast.success("تم حفظ وتحليل الجلسة بنجاح!", { id: "save-session" });
+    } else {
+      toast.error(result.error || "تعذرت إعادة المحاولة. تحقق من الاتصال ثم حاول مجدداً.", {
+        id: "save-session",
+      });
+    }
+  };
+
+  const handleResumeRecoverable = async () => {
+    if (!recoverableSession) return;
+    setSessionCategory(recoverableSession.type);
+    setTitle(recoverableSession.title);
+    if (recoverableSession.courseCode) setCourseCode(recoverableSession.courseCode);
+    if (recoverableSession.speakerName) setSpeakerName(recoverableSession.speakerName);
+    if (recoverableSession.language) setSelectedLanguage(recoverableSession.language);
+    setCompletedResourceId(null);
+    const ok = await resumeRecoverableSession();
+    if (ok) {
+      toast.success("تم استعادة الجلسة السابقة واستئناف التسجيل المباشر بنجاح");
+    }
+  };
+
+  const handleFinalizeRecoverable = async () => {
+    if (!recoverableSession) return;
+    setIsFinishing(true);
+    toast.loading("جاري إنهاء الجلسة المستردة وتشغيل التحليل الذكي...", { id: "save-session" });
+    const result = await finalizeRecoverableSession();
+    setIsFinishing(false);
+    if (result.success && result.resourceId) {
+      setCompletedResourceId(result.resourceId);
+      invalidateAllWorkspaceQueries();
+      toast.success("تم حفظ وتحليل الجلسة المستردة بنجاح!", { id: "save-session" });
+      onOpenChange(false);
+      if (onCompleted) {
+        onCompleted(result.resourceId, result.type || recoverableSession.type);
+      }
+    } else {
+      toast.error(result.error || "تعذر إنهاء الجلسة المستردة", { id: "save-session" });
+    }
+  };
+
+  const handleDownloadRecordedAudio = () => {
+    const audioUrl =
+      recordedAudioReview?.audioUrl ||
+      (completedResourceId ? `/api/v1/recordings/audio/${completedResourceId}` : "");
+    if (!audioUrl) return;
+    const a = document.createElement("a");
+    a.href = audioUrl;
+    a.download =
+      recordedAudioReview?.fileName ||
+      `${title.replace(/[^a-zA-Z0-9ء-ي_]/g, "_")}_${completedResourceId || "live"}.wav`;
+    a.click();
+    toast.success("تم بدء تحميل الملف الصوتي المسجل");
   };
 
   // Copy full Arabic transcript
@@ -179,13 +309,31 @@ export function LiveArabicRecorder({
     toast.success("تم تصدير ملف النص العربي بنجاح");
   };
 
-  // Save manual inline edit
+  // Save manual inline edit (and persist to active backend session)
   const handleSaveEdit = (segId: string) => {
     if (!editingText.trim()) return;
-    setSegments((prev) =>
-      prev.map((s) => (s.id === segId ? { ...s, text: editingText.trim() } : s)),
+    const updated = segments.map((s) =>
+      s.id === segId ? { ...s, text: editingText.trim() } : s,
     );
+    setSegments(updated);
     setEditingSegId(null);
+    if (recordingId) {
+      void api
+        .updateTranscript(
+          recordingId,
+          updated.map((s) => ({
+            id: s.id,
+            speaker: s.speaker,
+            startTime: s.startTime,
+            endTime: s.endTime,
+            text: s.text,
+            isPartial: false,
+            sequenceNumber: s.sequenceNumber,
+            chunkId: s.chunkId,
+          })),
+        )
+        .catch(() => {});
+    }
     toast.success("تم تحديث النص");
   };
 
@@ -197,8 +345,24 @@ export function LiveArabicRecorder({
     );
   });
 
+  const handleDialogOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen) {
+      if (isRecording) {
+        setShowClosePrompt(true);
+        return;
+      }
+      if (completedResourceId && onCompleted) {
+        onCompleted(completedResourceId, type);
+      }
+      setShowClosePrompt(false);
+      onOpenChange(false);
+    } else {
+      onOpenChange(true);
+    }
+  };
+
   return (
-    <Dialog open={open} onOpenChange={(val) => !isRecording && onOpenChange(val)}>
+    <Dialog open={open} onOpenChange={handleDialogOpenChange}>
       <DialogContent className="max-w-3xl max-h-[92vh] flex flex-col p-6 overflow-hidden bg-background/95 backdrop-blur-2xl border-primary/20">
         <DialogHeader className="space-y-1.5 pb-2 border-b border-border/50 text-right">
           <div className="flex items-center justify-between">
@@ -209,7 +373,7 @@ export function LiveArabicRecorder({
                   className="bg-destructive/15 text-destructive border-destructive/30 animate-pulse flex items-center gap-1.5 px-2.5 py-1 text-xs"
                 >
                   <Radio className="h-3.5 w-3.5" />
-                  تسجيل مباشر نشط
+                  {isPaused ? "متوقف مؤقتاً · Paused" : "تسجيل مباشر نشط"}
                 </Badge>
               ) : (
                 <Badge
@@ -223,6 +387,9 @@ export function LiveArabicRecorder({
               <span className="text-xs text-muted-foreground font-mono">
                 {formatTimer(elapsedSeconds)}
               </span>
+              <Badge variant="outline" className="text-[10px] font-mono border-border/50">
+                {stateMachine}
+              </Badge>
             </div>
 
             <DialogTitle className="text-lg font-display font-semibold flex items-center gap-2">
@@ -236,18 +403,63 @@ export function LiveArabicRecorder({
           </DialogDescription>
         </DialogHeader>
 
+        {/* Close While Recording Safety Prompt */}
+        {showClosePrompt && isRecording && (
+          <div className="rounded-xl border border-amber-500/50 bg-amber-500/15 p-3 flex flex-wrap items-center justify-between gap-2 text-right">
+            <div className="text-xs space-y-0.5">
+              <p className="font-semibold text-foreground">
+                أنت تقوم بالتسجيل حالياً (You are currently recording)
+              </p>
+              <p className="text-muted-foreground">
+                هل تريد إيقاف التسجيل وحفظ الجلسة وتشغيل التحليل الذكي؟ (Do you want to stop and save
+                the recording?)
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setShowClosePrompt(false)}
+                className="h-8 text-xs cursor-pointer"
+              >
+                متابعة التسجيل (Cancel)
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => void handleStopAndSave(true)}
+                disabled={isFinishing}
+                className="gradient-primary text-primary-foreground h-8 text-xs cursor-pointer"
+              >
+                إيقاف وحفظ (Stop & Save)
+              </Button>
+            </div>
+          </div>
+        )}
+
         {/* Configuration Bar (When not recording) */}
         {!isRecording && (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 py-2 text-right">
             <div className="space-y-1">
               <label className="text-[11px] font-medium text-muted-foreground">نوع الجلسة</label>
-              <Select value={type} onValueChange={(v: "meeting" | "lecture") => setType(v)}>
+              <Select
+                value={sessionCategory}
+                onValueChange={(v: SessionCategory) => {
+                  setSessionCategory(v);
+                  if (v === "lecture" && title === "جلسة عمل ومزامنة الأولويات") {
+                    setTitle("محاضرة الأنظمة الموزعة والتوافق");
+                  } else if (v === "interview" && title.includes("جلسة")) {
+                    setTitle("مقابلة تقنية وتقييم مهارات");
+                  }
+                }}
+              >
                 <SelectTrigger className="h-8 text-xs bg-background/60">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="meeting">اجتماع عمل (Business Meeting)</SelectItem>
+                  <SelectItem value="meeting">اجتماع عمل (Meeting)</SelectItem>
                   <SelectItem value="lecture">محاضرة تعليمية (Lecture)</SelectItem>
+                  <SelectItem value="interview">مقابلة (Interview)</SelectItem>
+                  <SelectItem value="general">جلسة عامة (General)</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -293,6 +505,172 @@ export function LiveArabicRecorder({
                 placeholder={type === "lecture" ? "رمز المادة (e.g. CS 6410)" : "اسم المتحدث..."}
               />
             </div>
+
+            {audioDevices.length > 1 && (
+              <div className="space-y-1 sm:col-span-2 lg:col-span-4">
+                <label className="text-[11px] font-medium text-muted-foreground">
+                  جهاز الميكروفون (Microphone Selector)
+                </label>
+                <Select value={selectedDeviceId} onValueChange={setSelectedDeviceId}>
+                  <SelectTrigger className="h-8 text-xs bg-background/60">
+                    <SelectValue placeholder="اختر الميكروفون..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="default">الميكروفون الافتراضي للنظام (Default)</SelectItem>
+                    {audioDevices.map((dev) => (
+                      <SelectItem key={dev.deviceId} value={dev.deviceId}>
+                        {dev.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Recoverable Interrupted Session Banner (Crash / Reload Recovery) */}
+        {!isRecording && recoverableSession && (
+          <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 flex flex-wrap items-center justify-between gap-2 text-right">
+            <div className="flex items-center gap-2 text-xs text-amber-200">
+              <RefreshCw
+                className={`h-4 w-4 text-amber-400 ${isRecovering ? "animate-spin" : ""}`}
+              />
+              <div>
+                <p className="font-semibold text-foreground">
+                  تم العثور على جلسة غير مكتملة: {recoverableSession.title}
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  {recoverableSession.segments.length} مقطع محفوظ
+                  {recoverableSession.pendingOfflineChunks > 0
+                    ? ` · ${recoverableSession.pendingOfflineChunks} مقطع محلي بانتظار المزامنة`
+                    : ""}
+                  {` · المدة ${formatTimer(recoverableSession.durationSeconds)}`}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <Button
+                size="sm"
+                onClick={handleResumeRecoverable}
+                disabled={isRecovering || isFinishing}
+                className="gradient-primary text-primary-foreground h-7 text-[11px] px-2.5 cursor-pointer"
+              >
+                استئناف التسجيل
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleFinalizeRecoverable}
+                disabled={isRecovering || isFinishing}
+                className="h-7 text-[11px] px-2.5 cursor-pointer border-amber-500/40"
+              >
+                إنهاء وتحليل الآن
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => void dismissRecoverableSession()}
+                disabled={isRecovering || isFinishing}
+                className="h-7 text-[11px] px-2 text-muted-foreground hover:text-destructive cursor-pointer"
+              >
+                تجاهل
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* Real Error Banner with Retry (never loses recorded audio) */}
+        {error && (
+          <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-right">
+            <div className="flex items-center gap-2 text-xs text-destructive">
+              <AlertCircle className="h-4 w-4 shrink-0" />
+              <span>{error}</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              {pendingChunksCount > 0 && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void retryFailedChunks()}
+                  className="h-7 text-[11px] border-destructive/40 cursor-pointer gap-1"
+                >
+                  <RefreshCw className="h-3 w-3" />
+                  إعادة مزامنة ({pendingChunksCount})
+                </Button>
+              )}
+              {canRetryFinalize && !isRecording && (
+                <Button
+                  size="sm"
+                  onClick={handleRetryFinalize}
+                  disabled={isFinishing}
+                  className="gradient-primary text-primary-foreground h-7 text-[11px] cursor-pointer gap-1"
+                >
+                  <RefreshCw className="h-3 w-3" />
+                  إعادة الحفظ والتحليل
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Post-Stop Real Audio Playback & Download Bar */}
+        {!isRecording && (recordedAudioReview || completedResourceId) && (
+          <div className="rounded-xl border border-primary/35 bg-primary/10 p-3 space-y-2 text-right">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-xs">
+                <Volume2 className="h-4 w-4 text-primary" />
+                <span className="font-semibold text-foreground">
+                  التسجيل الصوتي الجاهز للاستماع (Audio Playback)
+                </span>
+                <Badge variant="outline" className="text-[10px] font-mono">
+                  {formatTimer(recordedAudioReview?.durationSeconds ?? elapsedSeconds)}
+                </Badge>
+                {recordedAudioReview?.fileSizeBytes ? (
+                  <Badge variant="outline" className="text-[10px] font-mono">
+                    {formatBytes(recordedAudioReview.fileSizeBytes)}
+                  </Badge>
+                ) : null}
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleDownloadRecordedAudio}
+                  className="h-7 text-[11px] gap-1 cursor-pointer"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  تحميل الصوت
+                </Button>
+                {completedResourceId && (
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      const rid = completedResourceId;
+                      setCompletedResourceId(null);
+                      clearRecordedAudioReview();
+                      onOpenChange(false);
+                      if (onCompleted) onCompleted(rid, type);
+                    }}
+                    className="gradient-primary text-primary-foreground h-7 text-[11px] gap-1 cursor-pointer"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                    عرض التحليل الكامل والاختبار
+                  </Button>
+                )}
+              </div>
+            </div>
+
+            <audio
+              controls
+              preload="metadata"
+              src={
+                recordedAudioReview?.audioUrl ||
+                (completedResourceId ? `/api/v1/recordings/audio/${completedResourceId}` : "")
+              }
+              className="w-full h-9 rounded-lg"
+            />
           </div>
         )}
 
@@ -301,7 +679,11 @@ export function LiveArabicRecorder({
           <div className="flex items-center gap-3">
             {!isRecording ? (
               <Button
-                onClick={startRecording}
+                onClick={() => {
+                  setCompletedResourceId(null);
+                  void startRecording();
+                }}
+                disabled={isFinishing}
                 className="gradient-primary text-primary-foreground shadow-glow h-9 px-4 gap-2 text-xs font-semibold cursor-pointer"
               >
                 <Mic className="h-4 w-4" />
@@ -311,7 +693,7 @@ export function LiveArabicRecorder({
               <div className="flex items-center gap-2">
                 <Button
                   variant="destructive"
-                  onClick={handleStopAndSave}
+                  onClick={() => void handleStopAndSave(false)}
                   disabled={isFinishing}
                   className="h-9 px-4 gap-2 text-xs font-semibold cursor-pointer shadow-glow"
                 >
@@ -452,10 +834,14 @@ export function LiveArabicRecorder({
           </div>
         </div>
 
-        {/* Scrollable Live Transcript View (100% Arabic Only) */}
-        <div className="flex-1 overflow-y-auto space-y-3 p-4 rounded-xl border border-border/50 bg-background/40 min-h-[260px] text-right">
+        {/* Scrollable Live Transcript View */}
+        <div
+          ref={transcriptContainerRef}
+          onScroll={handleTranscriptScroll}
+          className="flex-1 overflow-y-auto space-y-3 p-4 rounded-xl border border-border/50 bg-background/40 min-h-[240px] text-right"
+        >
           {filteredSegments.length === 0 && !interimText && (
-            <div className="flex flex-col items-center justify-center h-48 text-muted-foreground text-center space-y-2">
+            <div className="flex flex-col items-center justify-center h-44 text-muted-foreground text-center space-y-2">
               <Mic className="h-8 w-8 text-primary/40 animate-pulse" />
               <p className="text-sm font-medium">
                 {isRecording
@@ -520,6 +906,11 @@ export function LiveArabicRecorder({
                       </div>
 
                       <div className="flex items-center gap-2">
+                        {typeof seg.confidence === "number" && (
+                          <span className="font-mono text-[10px] text-muted-foreground">
+                            {Math.round(seg.confidence * 100)}%
+                          </span>
+                        )}
                         <Badge
                           variant="outline"
                           className={`text-[10px] ${
@@ -597,19 +988,37 @@ export function LiveArabicRecorder({
         </div>
 
         {/* Footer info banner */}
-        <div className="pt-2 border-t border-border/40 flex items-center justify-between text-xs text-muted-foreground">
+        <div className="pt-2 border-t border-border/40 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
           <div className="flex items-center gap-1.5">
-            <span className="h-2 w-2 rounded-full bg-emerald-500 inline-block" />
-            <span>نظام الحفظ المستمر ومقاومة انقطاع الشبكة مفعّل</span>
+            <span
+              className={`h-2 w-2 rounded-full inline-block ${
+                connectionStatus === "offline"
+                  ? "bg-destructive"
+                  : connectionStatus === "reconnecting" || connectionStatus === "recovering"
+                    ? "bg-amber-400 animate-pulse"
+                    : "bg-emerald-500"
+              }`}
+            />
+            <span>
+              {connectionStatus === "offline"
+                ? `وضع عدم الاتصال — تم حفظ ${pendingChunksCount} مقطع محلياً بانتظار عودة الشبكة`
+                : connectionStatus === "reconnecting"
+                  ? `جاري إعادة الاتصال ومزامنة ${pendingChunksCount} مقطع...`
+                  : connectionStatus === "recovering"
+                    ? "جاري استعادة الجلسة..."
+                    : pendingChunksCount > 0
+                      ? `جاري رفع ومزامنة ${pendingChunksCount} مقطع صوتي...`
+                      : "نظام الحفظ المستمر ومقاومة انقطاع الشبكة مفعّل"}
+            </span>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
+            <span>الكلمات: {wordCount}</span>
             <span>إجمالي المقاطع المعتمدة: {segments.length}</span>
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => onOpenChange(false)}
-              disabled={isRecording}
+              onClick={() => handleDialogOpenChange(false)}
               className="h-7 text-xs cursor-pointer"
             >
               إغلاق

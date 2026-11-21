@@ -23,11 +23,14 @@ import {
   askMeetMindAI,
 } from "./ai";
 import {
+  assembleLiveAudioChunks,
   cancelJob,
   checkMediaToolsAvailable,
   createJob,
+  getLiveSessionChunksDir,
   processRecordingJob,
   retryJob,
+  runUnifiedPostTranscriptionPipeline,
   validateMediaFile,
 } from "./jobs";
 import { isGeminiConfigured } from "./gemini";
@@ -43,7 +46,7 @@ import {
   verifySavedFileIntegrity,
 } from "./storage";
 import { buildUserDataExport, buildUserProfileOverview } from "./profile";
-import { subscribeSync, notifySync, getLatestSyncEvent } from "./sync";
+import { subscribeSync, notifySync, getLatestSyncEventForUser } from "./sync";
 import { matchesArabicQuery } from "../lib/arabic";
 import {
   appendAuthCookies,
@@ -1109,19 +1112,29 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
     }
 
     // ----------------------------------------------------
-    // REAL-TIME SYNCHRONIZATION (AUTHENTICATED SSE & POLLING STATUS)
+    // REAL-TIME SYNCHRONIZATION (AUTHENTICATED USER-SCOPED SSE & POLLING STATUS)
     // ----------------------------------------------------
     if (pathname === "/api/v1/sync/status" && method === "GET") {
-      return Response.json(getLatestSyncEvent());
+      const user = getAuthUser(req);
+      const admin = isUserAdmin(user);
+      return Response.json(getLatestSyncEventForUser(user?.id, admin));
     }
 
     if (pathname === "/api/v1/sync/events" && method === "GET") {
+      const user = getAuthUser(req);
+      const admin = isUserAdmin(user);
+      const listenerUserId = user?.id;
+
       const stream = new ReadableStream({
         start(controller) {
           const encoder = new TextEncoder();
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(getLatestSyncEvent())}\n\n`));
+          const initialEvent = getLatestSyncEventForUser(listenerUserId, admin);
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(initialEvent)}\n\n`));
 
           const unsubscribe = subscribeSync((event) => {
+            if (!admin && event.userId && event.userId !== listenerUserId) {
+              return;
+            }
             try {
               controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
             } catch {
@@ -2320,23 +2333,47 @@ export async function handleApiRequest(req: Request): Promise<Response | null> {
     // TRANSCRIPTS & SESSIONS
     // ----------------------------------------------------
     if (pathname.startsWith("/api/v1/transcripts/session/") && method === "GET") {
+      const user = getAuthUser(req);
+      const admin = isUserAdmin(user);
       const id = pathname.replace("/api/v1/transcripts/session/", "");
       const meeting = db.get("meetings").find((m) => m.id === id);
       const lecture = db.get("lectures").find((l) => l.id === id);
       const item = meeting || lecture;
+      const sessionMeta = (db.get("recordingSessions") || []).find((s) => s.id === id);
 
       if (!item) {
         return Response.json({ error: "Recording session not found" }, { status: 404 });
       }
 
+      const ownerId = meeting ? meeting.hostId : lecture?.instructorId;
+      if (!admin && ownerId && user?.id && ownerId !== user.id) {
+        return Response.json(
+          { error: "Forbidden: access denied to this recording session" },
+          { status: 403 },
+        );
+      }
+
+      const sortedSegments = [...(item.segments || [])].sort((a, b) => {
+        if (typeof a.sequenceNumber === "number" && typeof b.sequenceNumber === "number") {
+          return a.sequenceNumber - b.sequenceNumber;
+        }
+        return (a.startTime || 0) - (b.startTime || 0);
+      });
+
       return Response.json({
         success: true,
         recordingId: id,
+        type: meeting ? "meeting" : "lecture",
         title: item.title,
-        status: item.status,
-        segments: item.segments || [],
-        fullText: item.fullText || (item.segments || []).map((s) => s.text).join(" "),
-        durationSeconds: item.durationSeconds,
+        courseCode: lecture?.courseCode,
+        language: item.language || sessionMeta?.language || "auto",
+        status: sessionMeta?.status || item.status,
+        resourceStatus: item.status,
+        segments: sortedSegments,
+        fullText: item.fullText || sortedSegments.map((s) => s.text).join(" "),
+        durationSeconds: Math.max(item.durationSeconds || 0, sessionMeta?.durationSeconds || 0),
+        lastSequenceNumber: sessionMeta?.lastSequenceNumber ?? sortedSegments.length - 1,
+        receivedChunkIds: sessionMeta?.receivedChunkIds || [],
       });
     }
 
@@ -2581,6 +2618,105 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
     // LIVE RECORDING LIFECYCLE & PERSISTENT SESSION APIS
     // ----------------------------------------------------
 
+    // 0. CHECK FOR RECOVERABLE ACTIVE / INTERRUPTED SESSION FOR CURRENT USER
+    if (pathname === "/api/v1/recordings/session/active" && method === "GET") {
+      const user = getAuthUser(req);
+      const admin = isUserAdmin(user);
+      const sessions = db.get("recordingSessions") || [];
+      const active = sessions.find((s) => {
+        const isRecoverable =
+          s.status === "Recording" ||
+          s.status === "Paused" ||
+          s.status === "Interrupted" ||
+          s.status === "Recovering";
+        if (!isRecoverable) return false;
+        if (admin) return true;
+        return !s.userId || s.userId === user?.id;
+      });
+
+      if (!active) {
+        return Response.json({ success: true, session: null });
+      }
+
+      const meeting = db.get("meetings").find((m) => m.id === active.id);
+      const lecture = db.get("lectures").find((l) => l.id === active.id);
+      const item = meeting || lecture;
+      if (!item) {
+        return Response.json({ success: true, session: null });
+      }
+
+      const sortedSegments = [...(item.segments || [])].sort((a, b) => {
+        if (typeof a.sequenceNumber === "number" && typeof b.sequenceNumber === "number") {
+          return a.sequenceNumber - b.sequenceNumber;
+        }
+        return (a.startTime || 0) - (b.startTime || 0);
+      });
+
+      return Response.json({
+        success: true,
+        session: {
+          ...active,
+          recordingId: active.id,
+          segments: sortedSegments,
+          durationSeconds: Math.max(active.durationSeconds || 0, item.durationSeconds || 0),
+        },
+      });
+    }
+
+    // 0b. UPDATE LIVE SESSION STATUS (Recording / Paused / Interrupted / Recovering)
+    if (
+      pathname.startsWith("/api/v1/recordings/session/") &&
+      pathname.endsWith("/status") &&
+      method === "PATCH"
+    ) {
+      const user = getAuthUser(req);
+      const admin = isUserAdmin(user);
+      const sessionId = pathname.replace("/api/v1/recordings/session/", "").replace("/status", "");
+      const body = await req.json();
+      const nextStatus = String(body.status || "");
+      const allowedStatuses = ["Recording", "Paused", "Interrupted", "Recovering"];
+      if (!allowedStatuses.includes(nextStatus)) {
+        return Response.json({ error: "Invalid session status" }, { status: 400 });
+      }
+
+      const meeting = db.get("meetings").find((m) => m.id === sessionId);
+      const lecture = db.get("lectures").find((l) => l.id === sessionId);
+      const ownerId = meeting ? meeting.hostId : lecture?.instructorId;
+      if (!meeting && !lecture) {
+        return Response.json({ error: "Recording session not found" }, { status: 404 });
+      }
+      if (!admin && ownerId && user?.id && ownerId !== user.id) {
+        return Response.json({ error: "Forbidden" }, { status: 403 });
+      }
+
+      const now = new Date().toISOString();
+      db.update("recordingSessions", (sessions) =>
+        sessions.map((s) =>
+          s.id === sessionId
+            ? {
+                ...s,
+                status: nextStatus as "Recording" | "Paused" | "Interrupted" | "Recovering",
+                durationSeconds:
+                  typeof body.durationSeconds === "number"
+                    ? Math.max(s.durationSeconds || 0, Math.round(body.durationSeconds))
+                    : s.durationSeconds,
+                updatedAt: now,
+              }
+            : s,
+        ),
+      );
+
+      notifySync({
+        type: "RecordingProgress",
+        userId: ownerId || user?.id,
+        id: sessionId,
+        resourceId: sessionId,
+        stage: nextStatus,
+      });
+
+      return Response.json({ success: true, recordingId: sessionId, status: nextStatus });
+    }
+
     // 1. START A RECORDING SESSION (Immediate DB Creation & Unique ID)
     if (pathname === "/api/v1/recordings/session/start" && method === "POST") {
       const user = getAuthUser(req);
@@ -2590,10 +2726,15 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
         title = "تسجيل مباشر جديد",
         courseCode = "GEN 101",
         speakerName = "المتحدث 1",
+        language = "auto",
       } = body;
 
       const now = new Date().toISOString();
-      const resourceId = type === "meeting" ? `m_${Date.now()}` : `l_${Date.now()}`;
+      const ownerId = user?.id || "usr_admin";
+      const resourceId =
+        type === "meeting"
+          ? `m_${Date.now()}_${crypto.randomBytes(2).toString("hex")}`
+          : `l_${Date.now()}_${crypto.randomBytes(2).toString("hex")}`;
 
       // Initialize persistent record immediately in database so it exists from second zero
       if (type === "meeting") {
@@ -2602,11 +2743,12 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
           workspaceId: "ws_default",
           title,
           hostName: speakerName || user?.name || "المتحدث 1",
-          hostId: user?.id || "usr_admin",
+          hostId: ownerId,
           date: now.split("T")[0],
           durationSeconds: 1,
           participantsCount: 1,
           status: "Processing",
+          language,
           segments: [],
           fullText: "",
           createdAt: now,
@@ -2620,10 +2762,11 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
           title,
           courseCode: courseCode || "CS 101",
           instructorName: speakerName || user?.name || "المحاضر",
-          instructorId: user?.id || "usr_admin",
+          instructorId: ownerId,
           date: now.split("T")[0],
           durationSeconds: 1,
           status: "Processing",
+          language,
           segments: [],
           fullText: "",
           createdAt: now,
@@ -2632,21 +2775,35 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
         db.update("lectures", (lectures) => [initialLecture, ...lectures]);
       }
 
-      // Track in active recording sessions
+      // Track in active recording sessions with ownerId and chunk sequence state
       db.update("recordingSessions", (sessions) => [
         {
           id: resourceId,
+          userId: ownerId,
           type,
           title,
           courseCode,
           speakerName,
+          language,
           status: "Recording",
           startedAt: now,
           updatedAt: now,
           segmentsCount: 0,
+          lastSequenceNumber: -1,
+          receivedChunkIds: [],
+          durationSeconds: 0,
         },
         ...sessions,
       ]);
+
+      notifySync({
+        type: "RecordingProgress",
+        userId: ownerId,
+        id: resourceId,
+        resourceId,
+        resourceType: type,
+        stage: "Recording",
+      });
 
       return Response.json({
         success: true,
@@ -2654,12 +2811,15 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
         resourceId,
         type,
         title,
+        language,
         status: "Recording",
       });
     }
 
-    // 2. INCREMENTAL AUTOSAVE: APPEND FINALIZED SEGMENT TO ACTIVE SESSION
+    // 2. INCREMENTAL AUTOSAVE: APPEND FINALIZED SEGMENT TO ACTIVE SESSION (Authorized + Idempotent)
     if (pathname === "/api/v1/transcripts/session/append-segment" && method === "POST") {
+      const user = getAuthUser(req);
+      const admin = isUserAdmin(user);
       const body = await req.json();
       const { recordingId, segment } = body;
 
@@ -2670,137 +2830,156 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
         );
       }
 
+      const meetings = db.get("meetings");
+      const lectures = db.get("lectures");
+      const meetingIdx = meetings.findIndex((m) => m.id === recordingId);
+      const lectureIdx = meetingIdx === -1 ? lectures.findIndex((l) => l.id === recordingId) : -1;
+
+      if (meetingIdx === -1 && lectureIdx === -1) {
+        return Response.json({ error: "Recording session not found" }, { status: 404 });
+      }
+
+      const ownerId =
+        meetingIdx !== -1 ? meetings[meetingIdx].hostId : lectures[lectureIdx].instructorId;
+      if (!admin && ownerId && user?.id && ownerId !== user.id) {
+        return Response.json(
+          { error: "Forbidden: cannot modify another user's recording" },
+          { status: 403 },
+        );
+      }
+
       const text = segment.text.trim();
       const now = new Date().toISOString();
-      let updated = false;
       let totalSegments = 0;
+      const segStart = Math.max(0, Math.round(segment.startTime ?? 0));
+      const segEnd = Math.max(Math.round(segment.endTime ?? segStart + 2), segStart + 1);
+      const seqNum =
+        typeof segment.sequenceNumber === "number" ? segment.sequenceNumber : undefined;
+      const chunkId = typeof segment.chunkId === "string" ? segment.chunkId : undefined;
 
-      // Check meetings
-      const meetings = db.get("meetings");
-      const meetingIdx = meetings.findIndex((m) => m.id === recordingId);
-      if (meetingIdx !== -1) {
-        db.update("meetings", (list) => {
-          const item = { ...list[meetingIdx] };
-          item.segments = item.segments || [];
-
-          // Deduplication: prevent identical phrase or overlapping timestamps with identical content
-          const duplicate = item.segments.some(
-            (s) =>
-              s.text.trim() === text ||
-              (Math.abs(s.startTime - segment.startTime) < 2.5 &&
-                (s.text.includes(text) || text.includes(s.text))),
-          );
-
-          if (!duplicate) {
-            item.segments.push({
-              id: segment.id || `seg_${Date.now()}_${item.segments.length}`,
-              speaker: segment.speaker || "المتحدث 1",
-              startTime: Math.round(segment.startTime ?? 0),
-              endTime: Math.max(
-                Math.round(segment.endTime ?? 2),
-                Math.round(segment.startTime ?? 0) + 1,
-              ),
-              text,
-            });
-            item.segments.sort((a, b) => a.startTime - b.startTime);
-            item.fullText = item.segments.map((s) => s.text).join(" ");
-            item.updatedAt = now;
-          }
-          list[meetingIdx] = item;
-          totalSegments = item.segments.length;
-          return [...list];
-        });
-        updated = true;
-      }
-
-      // Check lectures
-      if (!updated) {
-        const lectures = db.get("lectures");
-        const lectureIdx = lectures.findIndex((l) => l.id === recordingId);
-        if (lectureIdx !== -1) {
-          db.update("lectures", (list) => {
-            const item = { ...list[lectureIdx] };
-            item.segments = item.segments || [];
-
-            const duplicate = item.segments.some(
-              (s) =>
-                s.text.trim() === text ||
-                (Math.abs(s.startTime - segment.startTime) < 2.5 &&
-                  (s.text.includes(text) || text.includes(s.text))),
-            );
-
-            if (!duplicate) {
-              item.segments.push({
-                id: segment.id || `seg_${Date.now()}_${item.segments.length}`,
-                speaker: segment.speaker || "المحاضر",
-                startTime: Math.round(segment.startTime ?? 0),
-                endTime: Math.max(
-                  Math.round(segment.endTime ?? 2),
-                  Math.round(segment.startTime ?? 0) + 1,
-                ),
-                text,
-              });
-              item.segments.sort((a, b) => a.startTime - b.startTime);
-              item.fullText = item.segments.map((s) => s.text).join(" ");
-              item.updatedAt = now;
-            }
-            list[lectureIdx] = item;
-            totalSegments = item.segments.length;
-            return [...list];
+      const upsertIntoItem = <
+        T extends { segments: TranscriptSegment[]; fullText?: string; updatedAt: string },
+      >(
+        item: T,
+        defaultSpeaker: string,
+      ): T => {
+        const nextSegs = [...(item.segments || [])];
+        const duplicate = nextSegs.some(
+          (s) =>
+            (chunkId && s.chunkId === chunkId) ||
+            (typeof seqNum === "number" && s.sequenceNumber === seqNum) ||
+            s.text.trim() === text ||
+            (Math.abs(s.startTime - segStart) < 2.5 &&
+              (s.text.includes(text) || text.includes(s.text))),
+        );
+        if (!duplicate) {
+          nextSegs.push({
+            id: segment.id || `seg_${Date.now()}_${nextSegs.length}`,
+            speaker: segment.speaker || defaultSpeaker,
+            startTime: segStart,
+            endTime: segEnd,
+            text,
+            isPartial: false,
+            sequenceNumber: seqNum,
+            chunkId,
           });
-          updated = true;
+          nextSegs.sort((a, b) => {
+            if (typeof a.sequenceNumber === "number" && typeof b.sequenceNumber === "number") {
+              return a.sequenceNumber - b.sequenceNumber;
+            }
+            return (a.startTime || 0) - (b.startTime || 0);
+          });
         }
+        totalSegments = nextSegs.length;
+        return {
+          ...item,
+          segments: nextSegs,
+          fullText: nextSegs.map((s) => s.text).join(" "),
+          updatedAt: now,
+        };
+      };
+
+      if (meetingIdx !== -1) {
+        db.update("meetings", (list) =>
+          list.map((m, i) => (i === meetingIdx ? upsertIntoItem(m, "المتحدث 1") : m)),
+        );
+      } else {
+        db.update("lectures", (list) =>
+          list.map((l, i) => (i === lectureIdx ? upsertIntoItem(l, "المحاضر") : l)),
+        );
       }
 
-      // Sync active session status
       db.update("recordingSessions", (sessions) =>
         sessions.map((s) =>
-          s.id === recordingId ? { ...s, updatedAt: now, segmentsCount: totalSegments } : s,
+          s.id === recordingId
+            ? {
+                ...s,
+                updatedAt: now,
+                segmentsCount: totalSegments,
+                durationSeconds: Math.max(s.durationSeconds || 0, segEnd),
+              }
+            : s,
         ),
       );
+
+      notifySync({
+        type: "TranscriptFinal",
+        userId: ownerId || user?.id,
+        id: recordingId,
+        resourceId: recordingId,
+        count: totalSegments,
+      });
 
       return Response.json({
         success: true,
         recordingId,
         totalSegments,
-        saved: updated,
+        saved: true,
       });
     }
 
-    // 4. REAL-TIME AUDIO CHUNK INGESTION & AUTO-APPEND TO DB (Supports both multipart/form-data and JSON)
+    // 4. REAL-TIME AUDIO CHUNK INGESTION (Authorized, Idempotent, Disk-Persisted, Real ASR, Ordered)
     if (pathname === "/api/v1/transcripts/live-chunk" && method === "POST") {
+      const user = getAuthUser(req);
+      const admin = isUserAdmin(user);
       const contentType = (req.headers.get("content-type") || "").toLowerCase();
       let recordingId = "";
       let audioBase64: string | undefined;
-      let mimeType: string | undefined;
-      let chunkIndex = 0;
+      let mimeType = "audio/wav";
+      let sequenceNumber = 0;
+      let chunkId = "";
       let startTime = 0;
       let endTime = 3;
-      let speaker = "Speaker 1";
-      let interimText: string | undefined;
+      let duration = 3;
+      let speaker = "المتحدث 1";
       let recentContext: string | undefined;
       let language = "auto";
       let isMeeting = false;
 
       if (contentType.includes("multipart/form-data")) {
         const formData = await req.formData();
-        recordingId = String(formData.get("recordingId") || "");
+        recordingId = String(formData.get("recordingId") || formData.get("sessionId") || "");
         const file = formData.get("file") as File | null;
         if (file && file.size > 0) {
           const buf = Buffer.from(await file.arrayBuffer());
           audioBase64 = buf.toString("base64");
-          mimeType = file.type || String(formData.get("mimeType") || "audio/webm");
+          mimeType = file.type || String(formData.get("mimeType") || "audio/wav");
         } else {
           audioBase64 = formData.get("audioBase64")
             ? String(formData.get("audioBase64"))
             : undefined;
-          mimeType = formData.get("mimeType") ? String(formData.get("mimeType")) : "audio/webm";
+          mimeType = formData.get("mimeType") ? String(formData.get("mimeType")) : "audio/wav";
         }
-        chunkIndex = Number(formData.get("chunkIndex") || 0) || 0;
+        sequenceNumber =
+          Number(formData.get("sequenceNumber") ?? formData.get("chunkIndex") ?? 0) || 0;
+        chunkId = String(formData.get("chunkId") || `${recordingId}_seq_${sequenceNumber}`);
         startTime = Number(formData.get("startTime") ?? formData.get("offsetSeconds") ?? 0) || 0;
-        endTime = Number(formData.get("endTime") ?? startTime + 3) || startTime + 3;
-        speaker = String(formData.get("speaker") || "Speaker 1");
-        interimText = formData.get("interimText") ? String(formData.get("interimText")) : undefined;
+        duration = Number(formData.get("duration") ?? 0) || 0;
+        endTime =
+          Number(
+            formData.get("endTime") ?? (duration > 0 ? startTime + duration : startTime + 3),
+          ) || startTime + 3;
+        speaker = String(formData.get("speaker") || "المتحدث 1");
         recentContext = formData.get("recentContext")
           ? String(formData.get("recentContext"))
           : undefined;
@@ -2808,32 +2987,146 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
         isMeeting = String(formData.get("isMeeting") || "false") === "true";
       } else {
         const body = await req.json();
-        recordingId = body.recordingId || "";
+        recordingId = String(body.recordingId || body.sessionId || "");
         audioBase64 = body.audioBase64;
-        mimeType = body.mimeType;
-        chunkIndex = Number(body.chunkIndex ?? 0) || 0;
-        startTime = Number(body.startTime ?? 0) || 0;
-        endTime = Number(body.endTime ?? 3) || 3;
-        speaker = body.speaker || "Speaker 1";
-        interimText = body.interimText;
+        mimeType = body.mimeType || "audio/wav";
+        sequenceNumber = Number(body.sequenceNumber ?? body.chunkIndex ?? 0) || 0;
+        chunkId = String(body.chunkId || `${recordingId}_seq_${sequenceNumber}`);
+        startTime = Number(body.startTime ?? body.timestamp ?? 0) || 0;
+        duration = Number(body.duration ?? 0) || 0;
+        endTime =
+          Number(body.endTime ?? (duration > 0 ? startTime + duration : startTime + 3)) ||
+          startTime + 3;
+        speaker = body.speaker || "المتحدث 1";
         recentContext = body.recentContext;
         language = body.language || "auto";
         isMeeting = Boolean(body.isMeeting);
       }
 
+      // Verify ownership when recordingId is provided
+      let ownerId = user?.id || "usr_admin";
+      let targetMeetingIdx = -1;
+      let targetLectureIdx = -1;
+      if (recordingId) {
+        const meetings = db.get("meetings");
+        const lectures = db.get("lectures");
+        targetMeetingIdx = meetings.findIndex((m) => m.id === recordingId);
+        targetLectureIdx =
+          targetMeetingIdx === -1 ? lectures.findIndex((l) => l.id === recordingId) : -1;
+
+        if (targetMeetingIdx === -1 && targetLectureIdx === -1) {
+          return Response.json({ error: "Recording session not found" }, { status: 404 });
+        }
+
+        ownerId =
+          targetMeetingIdx !== -1
+            ? meetings[targetMeetingIdx].hostId
+            : lectures[targetLectureIdx].instructorId;
+
+        if (!admin && ownerId && user?.id && ownerId !== user.id) {
+          return Response.json(
+            { error: "Forbidden: access denied to this recording session" },
+            { status: 403 },
+          );
+        }
+
+        // Idempotency check: if chunkId or sequenceNumber was already processed, return existing segment immediately
+        const existingSegs =
+          targetMeetingIdx !== -1
+            ? meetings[targetMeetingIdx].segments || []
+            : lectures[targetLectureIdx].segments || [];
+        const existingSession = (db.get("recordingSessions") || []).find(
+          (s) => s.id === recordingId,
+        );
+        const alreadyReceived =
+          Boolean(existingSession?.receivedChunkIds?.includes(chunkId)) ||
+          existingSegs.some(
+            (s) =>
+              (chunkId && s.chunkId === chunkId) ||
+              (typeof s.sequenceNumber === "number" && s.sequenceNumber === sequenceNumber),
+          );
+
+        if (alreadyReceived) {
+          const existingSeg = existingSegs.find(
+            (s) => s.chunkId === chunkId || s.sequenceNumber === sequenceNumber,
+          );
+          return Response.json({
+            success: true,
+            duplicate: true,
+            chunkId,
+            sequenceNumber,
+            chunkIndex: sequenceNumber,
+            segmentId: existingSeg?.id,
+            startTime: existingSeg?.startTime ?? Math.round(startTime),
+            endTime:
+              existingSeg?.endTime ?? Math.max(Math.round(endTime), Math.round(startTime) + 1),
+            speaker: existingSeg?.speaker ?? speaker,
+            arabicText: existingSeg?.text || "",
+            text: existingSeg?.text || "",
+            detectedLanguage: existingSeg?.language || language,
+            isFinal: true,
+            savedToDb: true,
+          });
+        }
+      }
+
+      // Persist raw audio chunk to disk for full-session assembly on Stop (no huge base64 needed at finalize)
+      if (recordingId && audioBase64 && audioBase64.length > 64) {
+        try {
+          const sessionDir = getLiveSessionChunksDir(recordingId);
+          if (!fs.existsSync(sessionDir)) {
+            fs.mkdirSync(sessionDir, { recursive: true });
+          }
+          const lowerMime = (mimeType || "").toLowerCase();
+          const ext = lowerMime.includes("wav")
+            ? "wav"
+            : lowerMime.includes("ogg")
+              ? "ogg"
+              : lowerMime.includes("mp4") || lowerMime.includes("m4a")
+                ? "m4a"
+                : lowerMime.includes("mp3") || lowerMime.includes("mpeg")
+                  ? "mp3"
+                  : "webm";
+          const chunkPath = path.join(
+            sessionDir,
+            `chunk_${String(Math.max(0, sequenceNumber)).padStart(5, "0")}.${ext}`,
+          );
+          if (!fs.existsSync(chunkPath)) {
+            fs.writeFileSync(chunkPath, Buffer.from(audioBase64, "base64"));
+          }
+        } catch (diskErr) {
+          console.warn("Live chunk disk persistence warning:", diskErr);
+        }
+      }
+
+      // Run REAL speech-to-text ASR (no fake fallback!)
       const result = await transcribeAndTranslateAudioChunk({
         audioBase64,
         mimeType,
-        interimText,
         recentContext,
         language,
         offsetSeconds: startTime,
         isMeeting,
       });
 
+      if (result.error) {
+        return Response.json(
+          {
+            success: false,
+            chunkId,
+            sequenceNumber,
+            chunkIndex: sequenceNumber,
+            error: result.error,
+            retryable: Boolean(result.retryable),
+          },
+          { status: result.retryable ? 503 : 422 },
+        );
+      }
+
       const cleanText = (result.text || result.arabicText || "").trim();
       const isValidPhrase =
-        cleanText &&
+        Boolean(cleanText) &&
+        !result.isSilence &&
         cleanText !== "[صمت]" &&
         !cleanText.toLowerCase().includes("[silence]") &&
         !cleanText.includes("جاري الاستماع") &&
@@ -2841,176 +3134,352 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
         !cleanText.includes("جاري المعالجة");
 
       let savedToDb = false;
-      if (isValidPhrase && recordingId) {
-        const now = new Date().toISOString();
-        const segObj = {
-          id: `chunk_${Date.now()}_${chunkIndex}`,
-          speaker,
-          startTime: Math.round(startTime),
-          endTime: Math.max(Math.round(endTime), Math.round(startTime) + 1),
-          text: cleanText,
-          language,
-          isPartial: false,
-          chunkIndex,
-        };
+      let savedSegment: TranscriptSegment | undefined;
+      const now = new Date().toISOString();
+      const segStart = Math.max(0, Math.round(startTime));
+      const segEnd = Math.max(Math.round(endTime), segStart + 1);
 
-        const meetings = db.get("meetings");
-        const meetingIdx = meetings.findIndex((m) => m.id === recordingId);
-        if (meetingIdx !== -1) {
-          db.update("meetings", (list) => {
-            const item = { ...list[meetingIdx] };
-            item.segments = item.segments || [];
-            const duplicate = item.segments.some(
+      if (recordingId) {
+        if (isValidPhrase) {
+          const segObj: TranscriptSegment = {
+            id: `seg_${recordingId}_${sequenceNumber}`,
+            speaker,
+            startTime: segStart,
+            endTime: segEnd,
+            text: cleanText,
+            language: result.detectedLanguage || language,
+            isPartial: false,
+            chunkIndex: sequenceNumber,
+            sequenceNumber,
+            chunkId,
+          };
+
+          const mergeInto = <
+            T extends {
+              segments: TranscriptSegment[];
+              fullText?: string;
+              durationSeconds: number;
+              updatedAt: string;
+            },
+          >(
+            item: T,
+          ): T => {
+            const nextSegs = [...(item.segments || [])];
+            const duplicate = nextSegs.some(
               (s) =>
-                s.text.trim() === cleanText ||
-                (Math.abs(s.startTime - startTime) < 2.5 &&
-                  (s.text.includes(cleanText) || cleanText.includes(s.text))),
+                s.chunkId === chunkId ||
+                (typeof s.sequenceNumber === "number" && s.sequenceNumber === sequenceNumber) ||
+                (Math.abs(s.startTime - segStart) < 2.5 &&
+                  (s.text.trim() === cleanText ||
+                    s.text.includes(cleanText) ||
+                    cleanText.includes(s.text))),
             );
             if (!duplicate) {
-              item.segments.push(segObj);
-              item.segments.sort((a, b) => a.startTime - b.startTime);
-              item.fullText = item.segments.map((s) => s.text).join(" ");
-              item.updatedAt = now;
+              nextSegs.push(segObj);
+              nextSegs.sort((a, b) => {
+                if (typeof a.sequenceNumber === "number" && typeof b.sequenceNumber === "number") {
+                  return a.sequenceNumber - b.sequenceNumber;
+                }
+                return (a.startTime || 0) - (b.startTime || 0);
+              });
             }
-            list[meetingIdx] = item;
-            return [...list];
-          });
-          savedToDb = true;
-        } else {
-          const lectures = db.get("lectures");
-          const lectureIdx = lectures.findIndex((l) => l.id === recordingId);
-          if (lectureIdx !== -1) {
-            db.update("lectures", (list) => {
-              const item = { ...list[lectureIdx] };
-              item.segments = item.segments || [];
-              const duplicate = item.segments.some(
-                (s) =>
-                  s.text.trim() === cleanText ||
-                  (Math.abs(s.startTime - startTime) < 2.5 &&
-                    (s.text.includes(cleanText) || cleanText.includes(s.text))),
-              );
-              if (!duplicate) {
-                item.segments.push(segObj);
-                item.segments.sort((a, b) => a.startTime - b.startTime);
-                item.fullText = item.segments.map((s) => s.text).join(" ");
-                item.updatedAt = now;
-              }
-              list[lectureIdx] = item;
-              return [...list];
-            });
+            savedSegment = nextSegs.find((s) => s.chunkId === chunkId) || segObj;
+            return {
+              ...item,
+              segments: nextSegs,
+              fullText: nextSegs.map((s) => s.text).join(" "),
+              durationSeconds: Math.max(item.durationSeconds || 1, segEnd),
+              updatedAt: now,
+            };
+          };
+
+          if (targetMeetingIdx !== -1) {
+            db.update("meetings", (list) =>
+              list.map((m) => (m.id === recordingId ? mergeInto(m) : m)),
+            );
+            savedToDb = true;
+          } else if (targetLectureIdx !== -1) {
+            db.update("lectures", (list) =>
+              list.map((l) => (l.id === recordingId ? mergeInto(l) : l)),
+            );
             savedToDb = true;
           }
+        }
+
+        // Always record chunkId & sequenceNumber in recordingSessions so silence chunks are also idempotent
+        db.update("recordingSessions", (sessions) =>
+          sessions.map((s) => {
+            if (s.id !== recordingId) return s;
+            const seen = new Set(s.receivedChunkIds || []);
+            seen.add(chunkId);
+            const updatedSegCount =
+              targetMeetingIdx !== -1
+                ? db.get("meetings").find((m) => m.id === recordingId)?.segments?.length || 0
+                : db.get("lectures").find((l) => l.id === recordingId)?.segments?.length || 0;
+            return {
+              ...s,
+              updatedAt: now,
+              segmentsCount: updatedSegCount,
+              lastSequenceNumber: Math.max(s.lastSequenceNumber ?? -1, sequenceNumber),
+              receivedChunkIds: Array.from(seen).slice(-2000),
+              durationSeconds: Math.max(s.durationSeconds || 0, segEnd),
+            };
+          }),
+        );
+
+        if (isValidPhrase && savedSegment) {
+          notifySync({
+            type: "TranscriptFinal",
+            userId: ownerId,
+            id: recordingId,
+            resourceId: recordingId,
+            data: savedSegment,
+          });
         }
       }
 
       return Response.json({
         success: true,
-        chunkIndex,
-        startTime,
-        endTime,
+        chunkId,
+        sequenceNumber,
+        chunkIndex: sequenceNumber,
+        segmentId: savedSegment?.id,
+        startTime: segStart,
+        endTime: segEnd,
         speaker,
         arabicText: cleanText,
         text: cleanText,
+        isSilence: !isValidPhrase,
         detectedLanguage: result.detectedLanguage,
         isFinal: true,
         savedToDb,
       });
     }
 
-    // 5. FINALIZE LIVE SESSION: WRITE COMPLETE AUDIO FILE, MERGE ALL SEGMENTS, RUN AI ANALYSIS
+    // 5. FINALIZE LIVE SESSION: ASSEMBLE AUDIO, MERGE ORDERED SEGMENTS, RUN UNIFIED AI PIPELINE
     if (pathname === "/api/v1/transcripts/live-session/finalize" && method === "POST") {
       const user = getAuthUser(req);
+      const admin = isUserAdmin(user);
       const body = await req.json();
       const {
         recordingId,
         type = "meeting",
         title = "جلسة تسجيل مباشر",
         courseCode = "GEN 101",
+        language = "auto",
         segments = [],
-        durationSeconds = 60,
+        durationSeconds = 1,
         audioBase64,
       } = body;
 
       const now = new Date().toISOString();
+      const ownerId = user?.id || "usr_admin";
       const resourceId =
-        recordingId || (type === "meeting" ? `m_${Date.now()}` : `l_${Date.now()}`);
+        recordingId ||
+        (type === "meeting"
+          ? `m_${Date.now()}_${crypto.randomBytes(2).toString("hex")}`
+          : `l_${Date.now()}_${crypto.randomBytes(2).toString("hex")}`);
 
-      let recordingPath: string | undefined = undefined;
-      let audioUrl: string | undefined = undefined;
+      const existingMeeting = db.get("meetings").find((m) => m.id === resourceId);
+      const existingLecture = db.get("lectures").find((l) => l.id === resourceId);
+      const existingItem = existingMeeting || existingLecture;
 
-      // 1. Physically write complete audio file to disk
-      if (audioBase64 && audioBase64.length > 32) {
-        if (!fs.existsSync(RECORDINGS_DIR)) {
-          fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
+      // Ownership check on pre-existing session
+      if (existingItem) {
+        const itemOwner = existingMeeting ? existingMeeting.hostId : existingLecture?.instructorId;
+        if (!admin && itemOwner && user?.id && itemOwner !== user.id) {
+          return Response.json(
+            { error: "Forbidden: cannot finalize another user's recording" },
+            { status: 403 },
+          );
         }
+      }
+
+      const effectiveType: "meeting" | "lecture" = existingLecture
+        ? "lecture"
+        : existingMeeting
+          ? "meeting"
+          : type === "lecture"
+            ? "lecture"
+            : "meeting";
+
+      if (!fs.existsSync(RECORDINGS_DIR)) {
+        fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
+      }
+
+      let recordingPath: string | undefined = existingItem?.recordingPath;
+      let recordingFileName: string | undefined = existingItem?.recordingFileName;
+      let audioUrl: string | undefined = existingItem?.audioUrl;
+      let assembledDuration = Math.max(1, Math.round(Number(durationSeconds) || 1));
+
+      // 1. Assemble complete audio file from persisted disk chunks (scales to 2+ hour sessions!)
+      try {
+        const assembledWavName = `recording_${resourceId}.wav`;
+        const assembledWavPath = path.join(RECORDINGS_DIR, assembledWavName);
+        const assembled = await assembleLiveAudioChunks(resourceId, assembledWavPath);
+        if (assembled.assembledPath && fs.existsSync(assembled.assembledPath)) {
+          recordingPath = assembled.assembledPath;
+          recordingFileName = assembledWavName;
+          audioUrl = `/api/v1/recordings/audio/${resourceId}`;
+          assembledDuration = Math.max(assembledDuration, assembled.durationSeconds);
+        }
+      } catch (asmErr) {
+        console.warn("Live chunk audio assembly notice:", asmErr);
+      }
+
+      // Fallback: if no disk chunks were assembled and client sent audioBase64, persist it
+      if (!recordingPath && audioBase64 && audioBase64.length > 32) {
         const fileName = `recording_${resourceId}.webm`;
         const filePath = path.join(RECORDINGS_DIR, fileName);
         try {
-          const buffer = Buffer.from(audioBase64, "base64");
-          fs.writeFileSync(filePath, buffer);
+          fs.writeFileSync(filePath, Buffer.from(audioBase64, "base64"));
           recordingPath = filePath;
+          recordingFileName = fileName;
           audioUrl = `/api/v1/recordings/audio/${resourceId}`;
         } catch (e) {
           console.error("Failed to write recording audio file:", e);
         }
       }
 
-      // Check if item already exists from session/start
-      const existingMeeting = db.get("meetings").find((m) => m.id === resourceId);
-      const existingLecture = db.get("lectures").find((l) => l.id === resourceId);
-      const existingItem = existingMeeting || existingLecture;
-
-      // 2. Merge existing segments in DB with any passed segments, deduplicating cleanly
+      // 2. Merge persisted server segments with any final client-flushed segments, deduplicating & ordering cleanly
       const initialSegs = existingItem?.segments || [];
       const mergedSegments: TranscriptSegment[] = [...initialSegs];
 
-      for (const seg of segments) {
-        if (!seg.text || !seg.text.trim()) continue;
+      for (const seg of Array.isArray(segments) ? segments : []) {
+        if (!seg || typeof seg.text !== "string" || !seg.text.trim()) continue;
         const trimmed = seg.text.trim();
+        const segStart = Math.max(0, Math.round(seg.startTime ?? 0));
+        const segEnd = Math.max(Math.round(seg.endTime ?? segStart + 2), segStart + 1);
+        const seqNum = typeof seg.sequenceNumber === "number" ? seg.sequenceNumber : undefined;
+        const cId = typeof seg.chunkId === "string" ? seg.chunkId : undefined;
+
         const isDuplicate = mergedSegments.some(
           (m) =>
+            (cId && m.chunkId === cId) ||
+            (typeof seqNum === "number" && m.sequenceNumber === seqNum) ||
             m.text.trim() === trimmed ||
-            (Math.abs(m.startTime - seg.startTime) < 2.5 &&
+            (Math.abs(m.startTime - segStart) < 2.5 &&
               (m.text.includes(trimmed) || trimmed.includes(m.text))),
         );
         if (!isDuplicate) {
           mergedSegments.push({
             id: seg.id || `seg_${Date.now()}_${mergedSegments.length}`,
-            speaker: seg.speaker || (type === "meeting" ? "المتحدث 1" : "المحاضر"),
-            startTime: Math.round(seg.startTime ?? 0),
-            endTime: Math.max(Math.round(seg.endTime ?? 2), Math.round(seg.startTime ?? 0) + 1),
+            speaker: seg.speaker || (effectiveType === "meeting" ? "المتحدث 1" : "المحاضر"),
+            startTime: segStart,
+            endTime: segEnd,
             text: trimmed,
+            isPartial: false,
+            sequenceNumber: seqNum,
+            chunkId: cId,
           });
         }
       }
 
-      // Chronological sort
-      mergedSegments.sort((a, b) => a.startTime - b.startTime);
+      mergedSegments.sort((a, b) => {
+        if (typeof a.sequenceNumber === "number" && typeof b.sequenceNumber === "number") {
+          return a.sequenceNumber - b.sequenceNumber;
+        }
+        return (a.startTime || 0) - (b.startTime || 0);
+      });
 
-      const consolidatedFullText = mergedSegments.map((s) => s.text).join(" ");
+      // Ensure base meeting/lecture record exists before running unified pipeline
+      if (!existingItem) {
+        if (effectiveType === "meeting") {
+          db.update("meetings", (meetings) => [
+            {
+              id: resourceId,
+              workspaceId: "ws_default",
+              title,
+              hostName: user?.name || "المتحدث 1",
+              hostId: ownerId,
+              date: now.split("T")[0],
+              durationSeconds: assembledDuration,
+              participantsCount: 1,
+              status: "Processing",
+              language,
+              recordingPath,
+              recordingFileName,
+              audioUrl,
+              segments: mergedSegments,
+              fullText: mergedSegments.map((s) => s.text).join(" "),
+              createdAt: now,
+              updatedAt: now,
+            },
+            ...meetings,
+          ]);
+        } else {
+          db.update("lectures", (lectures) => [
+            {
+              id: resourceId,
+              workspaceId: "ws_default",
+              title,
+              courseCode: courseCode || "CS 101",
+              instructorName: user?.name || "المحاضر",
+              instructorId: ownerId,
+              date: now.split("T")[0],
+              durationSeconds: assembledDuration,
+              status: "Processing",
+              language,
+              recordingPath,
+              recordingFileName,
+              audioUrl,
+              segments: mergedSegments,
+              fullText: mergedSegments.map((s) => s.text).join(" "),
+              createdAt: now,
+              updatedAt: now,
+            },
+            ...lectures,
+          ]);
+        }
+      }
 
-      // If no live segments were captured yet and we have a real recorded audio file, queue background ASR pipeline
+      // Mark session as Processing immediately
+      db.update("recordingSessions", (sessions) =>
+        sessions.map((s) =>
+          s.id === resourceId
+            ? {
+                ...s,
+                status: "Processing",
+                durationSeconds: assembledDuration,
+                segmentsCount: mergedSegments.length,
+                updatedAt: now,
+              }
+            : s,
+        ),
+      );
+
+      notifySync({
+        type: "ProcessingStarted",
+        userId: ownerId,
+        id: resourceId,
+        resourceId,
+        resourceType: effectiveType,
+        progress: 15,
+      });
+
+      // If no live segments were captured yet and we have a real recorded audio file, run full ASR + Unified Pipeline job
       if (mergedSegments.length === 0 && recordingPath && fs.existsSync(recordingPath)) {
-        const probe = await validateMediaFile(recordingPath, `recording_${resourceId}.webm`);
+        const probe = await validateMediaFile(
+          recordingPath,
+          recordingFileName || `recording_${resourceId}.wav`,
+        );
         if (probe.valid) {
           const job = createJob(
-            type,
+            effectiveType,
             resourceId,
-            `recording_${resourceId}.webm`,
+            recordingFileName || `recording_${resourceId}.wav`,
             recordingPath,
-            body.language || "auto",
-            {
-              userId: user?.id || "usr_admin",
-            },
+            language || "auto",
+            { userId: ownerId },
           );
           setTimeout(() => {
             void processRecordingJob(
               job.id,
-              type,
+              effectiveType,
               resourceId,
               recordingPath!,
-              `recording_${resourceId}.webm`,
-              body.language || "auto",
+              recordingFileName || `recording_${resourceId}.wav`,
+              language || "auto",
             );
           }, 50);
 
@@ -3025,109 +3494,74 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
         }
       }
 
-      const keywords = extractKeywordsWithFrequency(mergedSegments, 10);
-      const highlights = extractHighlightsFromSegments(mergedSegments);
-      const analysis =
-        mergedSegments.length > 0
-          ? await generateAiSummary(title, mergedSegments, type, courseCode)
-          : { summary: "", keyPoints: [], decisions: [], actionItems: [] };
-
-      if (type === "meeting") {
-        const meetingObj: MeetingRecord = {
-          id: resourceId,
-          workspaceId: "ws_default",
-          title: existingMeeting?.title || title,
-          hostName: existingMeeting?.hostName || user?.name || "Organizer",
-          hostId: existingMeeting?.hostId || user?.id || "usr_admin",
-          date: existingMeeting?.date || now.split("T")[0],
-          durationSeconds: Math.max(1, durationSeconds, existingMeeting?.durationSeconds || 1),
-          participantsCount: existingMeeting?.participantsCount || 1,
-          status: mergedSegments.length > 0 ? "Completed" : "Failed",
-          recordingPath: recordingPath || existingMeeting?.recordingPath,
-          recordingFileName: recordingPath
-            ? `recording_${resourceId}.webm`
-            : existingMeeting?.recordingFileName,
-          audioUrl: audioUrl || existingMeeting?.audioUrl,
-          summary: analysis.summary,
-          executiveSummary: analysis.summary,
-          detailedSummary: analysis.summary,
-          keyPoints: analysis.keyPoints,
-          decisions: analysis.decisions,
-          topics: keywords.slice(0, 4).map((k) => k.term),
-          keywords,
-          highlights,
-          fullText: consolidatedFullText,
-          segments: mergedSegments,
-          createdAt: existingMeeting?.createdAt || now,
-          updatedAt: now,
-        };
-
-        if (existingMeeting) {
-          db.update("meetings", (meetings) =>
-            meetings.map((m) => (m.id === resourceId ? meetingObj : m)),
+      // Strict No-Fake-Data rule: if zero speech segments and no playable audio, fail cleanly without fabricating content
+      if (mergedSegments.length === 0) {
+        db.update("recordingSessions", (sessions) =>
+          sessions.map((s) =>
+            s.id === resourceId
+              ? {
+                  ...s,
+                  status: "Failed",
+                  errorMessage: "No audible speech was captured during this recording session.",
+                  completedAt: now,
+                  updatedAt: now,
+                }
+              : s,
+          ),
+        );
+        if (effectiveType === "meeting") {
+          db.update("meetings", (list) =>
+            list.map((m) => (m.id === resourceId ? { ...m, status: "Failed", updatedAt: now } : m)),
           );
         } else {
-          db.update("meetings", (meetings) => [meetingObj, ...meetings]);
+          db.update("lectures", (list) =>
+            list.map((l) => (l.id === resourceId ? { ...l, status: "Failed", updatedAt: now } : l)),
+          );
         }
-      } else {
-        const lectureObj: LectureRecord = {
+        notifySync({
+          type: "ProcessingFailed",
+          userId: ownerId,
           id: resourceId,
-          workspaceId: "ws_default",
-          title: existingLecture?.title || title,
-          courseCode: existingLecture?.courseCode || courseCode || "CS 101",
-          instructorName: existingLecture?.instructorName || user?.name || "Lecturer",
-          instructorId: existingLecture?.instructorId || user?.id || "usr_admin",
-          date: existingLecture?.date || now.split("T")[0],
-          durationSeconds: Math.max(1, durationSeconds, existingLecture?.durationSeconds || 1),
-          status: mergedSegments.length > 0 ? "Completed" : "Failed",
-          recordingPath: recordingPath || existingLecture?.recordingPath,
-          recordingFileName: recordingPath
-            ? `recording_${resourceId}.webm`
-            : existingLecture?.recordingFileName,
-          audioUrl: audioUrl || existingLecture?.audioUrl,
-          studyNotes: analysis.summary,
-          summary: analysis.summary,
-          executiveSummary: analysis.summary,
-          detailedSummary: analysis.summary,
-          topics: keywords.slice(0, 4).map((k) => k.term),
-          keywords,
-          highlights,
-          fullText: consolidatedFullText,
-          segments: mergedSegments,
-          createdAt: existingLecture?.createdAt || now,
-          updatedAt: now,
-        };
+          resourceId,
+          error: "No audible speech was captured during this recording session.",
+        });
+        return Response.json(
+          {
+            success: false,
+            resourceId,
+            segmentsCount: 0,
+            hasAudio: Boolean(recordingPath),
+            status: "Failed",
+            error:
+              "لم يتم التقاط كلام مسموع في هذا التسجيل. تأكد من عمل الميكروفون ثم أعد المحاولة.",
+          },
+          { status: 422 },
+        );
+      }
 
-        if (existingLecture) {
-          db.update("lectures", (lectures) =>
-            lectures.map((l) => (l.id === resourceId ? lectureObj : l)),
-          );
-        } else {
-          db.update("lectures", (lectures) => [lectureObj, ...lectures]);
-        }
+      // 3. Execute the EXACT SAME Unified Post-Transcription Intelligence Pipeline as uploaded audio files
+      const pipelineResult = await runUnifiedPostTranscriptionPipeline({
+        resourceType: effectiveType,
+        resourceId,
+        title: existingItem?.title || title,
+        courseCode: existingLecture?.courseCode || courseCode,
+        language,
+        durationSeconds: assembledDuration,
+        segments: mergedSegments,
+        userId: ownerId,
+        recordingPath,
+        recordingFileName,
+        audioUrl,
+      });
 
-        if (mergedSegments.length > 0) {
-          const generatedQuiz = await generateAiQuiz(
-            title,
-            mergedSegments,
-            analysis.summary,
-            courseCode,
-          );
-          if (generatedQuiz.questions.length > 0) {
-            db.update("quizzes", (quizzes) => [
-              {
-                id: `quiz_${resourceId}`,
-                lectureId: resourceId,
-                title: generatedQuiz.title,
-                courseCode: courseCode || "CS 101",
-                questions: generatedQuiz.questions,
-                attemptsCount: 0,
-                createdAt: now,
-              },
-              ...quizzes.filter((q) => q.lectureId !== resourceId),
-            ]);
-          }
+      // Clean up temporary per-chunk folder once assembled recording is safely saved
+      try {
+        const liveDir = getLiveSessionChunksDir(resourceId);
+        if (recordingPath && fs.existsSync(liveDir)) {
+          fs.rmSync(liveDir, { recursive: true, force: true });
         }
+      } catch {
+        // non-fatal cleanup
       }
 
       db.update("recordingSessions", (sessions) =>
@@ -3135,37 +3569,32 @@ ${segments.map((s) => `<div class="seg"><div class="meta">[${fmtTime(s.startTime
           s.id === resourceId
             ? {
                 ...s,
-                status: mergedSegments.length > 0 ? "Completed" : "Failed",
-                completedAt: now,
+                status: "Completed",
+                completedAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
                 segmentsCount: mergedSegments.length,
+                durationSeconds: assembledDuration,
               }
             : s,
         ),
       );
 
-      db.update("notifications", (notifs) => [
-        {
-          id: `notif_${Date.now()}`,
-          userId: user?.id || "usr_admin",
-          title:
-            mergedSegments.length > 0
-              ? "Recording finalized and analyzed"
-              : "Recording had no speech detected",
-          body: `Processed "${title}" (${mergedSegments.length} segments).`,
-          targetUrl: `/transcript?id=${resourceId}`,
-          read: false,
-          type: "summary",
-          createdAt: now,
-        },
-        ...notifs,
-      ]);
+      notifySync({
+        type: "ProcessingCompleted",
+        userId: ownerId,
+        id: resourceId,
+        resourceId,
+        resourceType: effectiveType,
+        progress: 100,
+      });
 
       return Response.json({
-        success: mergedSegments.length > 0,
+        success: true,
         resourceId,
         segmentsCount: mergedSegments.length,
-        hasAudio: !!(recordingPath || existingItem?.recordingPath),
-        status: mergedSegments.length > 0 ? "Completed" : "Failed",
+        hasAudio: Boolean(recordingPath),
+        status: "Completed",
+        pipeline: pipelineResult,
       });
     }
 

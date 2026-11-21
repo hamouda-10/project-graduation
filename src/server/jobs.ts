@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
+import { ThinkingLevel } from "@google/genai";
 import { db, JobRecord, TranscriptSegment } from "./db";
 import {
   extractHighlightsFromSegments,
@@ -16,6 +17,8 @@ import {
 import { extractGeminiTranscriptText, getGeminiClient } from "./gemini";
 import { getChunksDir, inspectMediaContainerSignature } from "./storage";
 import { notifySync } from "./sync";
+
+const TEXT_MODEL = "gemini-4-hydrogen";
 
 const execFileAsync = promisify(execFile);
 const CHUNKS_BASE_DIR = getChunksDir();
@@ -858,11 +861,11 @@ async function transcribeAudioWithGemini(
       console.warn("Primary gemini-3.5-transcribe warning, trying multimodal fallback:", msg);
     }
 
-    // Secondary real multimodal ASR pass via gemini-3.1-flash-lite if dedicated ASR returned empty
+    // Secondary real multimodal ASR pass via gemini-4-hydrogen if dedicated ASR returned empty
     if (!verbatimText) {
       try {
         const fallbackResp = await ai.models.generateContent({
-          model: "gemini-3.1-flash-lite",
+          model: TEXT_MODEL,
           contents: {
             parts: [
               audioPart,
@@ -871,6 +874,7 @@ async function transcribeAudioWithGemini(
               },
             ],
           },
+          config: { thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL } },
         });
         verbatimText = extractGeminiTranscriptText(fallbackResp);
       } catch (fallbackErr) {
@@ -902,9 +906,12 @@ ${verbatimText}
 Return ONLY a JSON array: [{"speaker":"${isMeeting ? "Speaker 1" : "Lecturer"}","startTime":0,"endTime":10,"text":"exact text slice"}]`;
 
       const structuredResp = await ai.models.generateContent({
-        model: "gemini-3.1-flash-lite",
+        model: TEXT_MODEL,
         contents: segPrompt,
-        config: { responseMimeType: "application/json" },
+        config: {
+          responseMimeType: "application/json",
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        },
       });
 
       const rawResp = (structuredResp.text || "").trim();
@@ -1228,10 +1235,8 @@ export async function processRecordingJob(
 
     const fullText = segments.map((s) => `${s.speaker}: ${s.text}`).join("\n");
 
-    // 5. AI Intelligence Extraction
-    updateJob(jobId, { status: "Analyzing", stage: "AIAnalysis", progressPercent: 82 });
-    notifySync({ type: "AIAnalysisStarted", id: resourceId, jobId, progress: 82 });
-
+    // 5-8. Run the Unified Post-Transcription Intelligence Pipeline (shared identically by Upload & Live Recording)
+    const jobOwnerId = db.get("jobs").find((j) => j.id === jobId)?.userId || "usr_admin";
     const resourceTitle =
       resourceType === "meeting"
         ? db.get("meetings").find((m) => m.id === resourceId)?.title || originalFilename
@@ -1241,242 +1246,36 @@ export async function processRecordingJob(
         ? db.get("lectures").find((l) => l.id === resourceId)?.courseCode
         : undefined;
 
-    const keywords = extractKeywordsWithFrequency(segments, 10);
-    const highlights = extractHighlightsFromSegments(segments);
-    notifySync({ type: "KeywordsReady", id: resourceId, jobId, progress: 84 });
+    await runUnifiedPostTranscriptionPipeline({
+      resourceType,
+      resourceId,
+      title: resourceTitle,
+      courseCode,
+      language,
+      durationSeconds,
+      segments,
+      userId: jobOwnerId,
+      jobId,
+      checkCancelled: () => assertNotCancelled(jobId),
+    });
 
-    // Run summary and deep analysis concurrently to minimize wall-clock latency
-    const [analysis, deepAnalysis] = await Promise.all([
-      generateAiSummary(resourceTitle, segments, resourceType, courseCode),
-      generateAiLectureAnalysis(resourceTitle, segments, resourceType, courseCode).catch(
-        () => undefined,
-      ),
-    ]);
-    notifySync({ type: "SummaryReady", id: resourceId, jobId, progress: 88 });
-
-    // 6. Quiz Generation (for lectures)
-    let generatedQuiz = undefined;
-    if (resourceType === "lecture") {
-      updateJob(jobId, { status: "Generating Quiz", stage: "QuizGeneration", progressPercent: 92 });
-      try {
-        generatedQuiz = await generateAiQuiz(resourceTitle, segments, analysis.summary, courseCode);
-        notifySync({ type: "QuizReady", id: resourceId, jobId, progress: 94 });
-      } catch {
-        // non-blocking
-      }
-    }
-
-    assertNotCancelled(jobId);
-
-    // 7. Persist Real Extracted Data
-    const now = new Date().toISOString();
-    if (resourceType === "meeting") {
-      const targetMeeting = db.get("meetings").find((m) => m.id === resourceId);
-      db.update("meetings", (meetings) =>
-        meetings.map((m) => {
-          if (m.id === resourceId) {
-            return {
-              ...m,
-              status: "Completed",
-              language,
-              durationSeconds,
-              summary: analysis.summary,
-              executiveSummary: analysis.summary,
-              detailedSummary: analysis.summary,
-              keyPoints: analysis.keyPoints,
-              decisions: analysis.decisions,
-              topics: deepAnalysis?.topics || keywords.slice(0, 4).map((k) => k.term),
-              keywords,
-              highlights,
-              analysis: deepAnalysis
-                ? {
-                    topics: deepAnalysis.topics,
-                    keywords: deepAnalysis.keywords,
-                    definitions: deepAnalysis.definitions,
-                    questionsAsked: deepAnalysis.questionsAsked,
-                    actionItems: deepAnalysis.actionItems,
-                    emphasizedPoints: deepAnalysis.emphasizedPoints,
-                    reviewAreas: deepAnalysis.reviewAreas,
-                  }
-                : undefined,
-              fullText,
-              segments,
-              updatedAt: now,
-            };
-          }
-          return m;
-        }),
-      );
-
-      if (analysis.actionItems.length > 0) {
-        db.update("actionItems", (items) => [
-          ...items.filter((i) => i.meetingId !== resourceId),
-          ...analysis.actionItems.map((aiItem, idx) => ({
-            id: `task_${jobId}_${idx + 1}`,
-            userId: targetMeeting?.hostId || "usr_admin",
-            meetingId: resourceId,
-            title: aiItem.title,
-            ownerName: aiItem.ownerName,
-            deadlineText: aiItem.dueDate || "Deadline not specified.",
-            dueDate: aiItem.dueDate === "Deadline not specified." ? undefined : aiItem.dueDate,
-            priority: aiItem.priority,
-            completed: false,
-            createdAt: now,
-          })),
-        ]);
-        notifySync({ type: "TasksReady", id: resourceId, jobId, progress: 95 });
-      }
-    } else {
-      const targetLecture = db.get("lectures").find((l) => l.id === resourceId);
-      db.update("lectures", (lectures) =>
-        lectures.map((l) => {
-          if (l.id === resourceId) {
-            return {
-              ...l,
-              status: "Completed",
-              language,
-              durationSeconds,
-              studyNotes: analysis.summary,
-              summary: analysis.summary,
-              executiveSummary: analysis.summary,
-              detailedSummary: analysis.summary,
-              keyConcepts: deepAnalysis?.definitions?.length
-                ? deepAnalysis.definitions.map((d) => ({ term: d.term, definition: d.definition }))
-                : [],
-              examHighlights: deepAnalysis?.emphasizedPoints?.length
-                ? deepAnalysis.emphasizedPoints
-                : analysis.keyPoints,
-              topics: deepAnalysis?.topics || keywords.slice(0, 4).map((k) => k.term),
-              keywords,
-              highlights,
-              analysis: deepAnalysis
-                ? {
-                    topics: deepAnalysis.topics,
-                    keywords: deepAnalysis.keywords,
-                    definitions: deepAnalysis.definitions,
-                    questionsAsked: deepAnalysis.questionsAsked,
-                    actionItems: deepAnalysis.actionItems,
-                    emphasizedPoints: deepAnalysis.emphasizedPoints,
-                    reviewAreas: deepAnalysis.reviewAreas,
-                  }
-                : undefined,
-              fullText,
-              segments,
-              updatedAt: now,
-            };
-          }
-          return l;
-        }),
-      );
-
-      if (generatedQuiz) {
-        db.update("quizzes", (quizzes) => [
-          {
-            id: `quiz_${jobId}`,
-            lectureId: resourceId,
-            title: generatedQuiz.title,
-            courseCode,
-            questions: generatedQuiz.questions,
-            attemptsCount: 0,
-            createdAt: now,
-          },
-          ...quizzes.filter((q) => q.lectureId !== resourceId),
-        ]);
-      }
-
-      if (analysis.actionItems.length > 0) {
-        db.update("actionItems", (items) => [
-          ...items.filter((i) => i.lectureId !== resourceId),
-          ...analysis.actionItems.map((aiItem, idx) => ({
-            id: `task_${jobId}_${idx + 1}`,
-            userId: targetLecture?.instructorId || "usr_admin",
-            lectureId: resourceId,
-            title: aiItem.title,
-            ownerName: aiItem.ownerName,
-            deadlineText: aiItem.dueDate || "Deadline not specified.",
-            dueDate: aiItem.dueDate === "Deadline not specified." ? undefined : aiItem.dueDate,
-            priority: aiItem.priority,
-            completed: false,
-            createdAt: now,
-          })),
-        ]);
-      }
-
-      try {
-        const [generatedCards, generatedMindMap] = await Promise.all([
-          generateAiFlashcards(resourceTitle, segments, analysis.summary, courseCode).catch(
-            () => [],
-          ),
-          generateAiMindMap(resourceTitle, segments, analysis.summary, courseCode).catch(
-            () => undefined,
-          ),
-        ]);
-
-        if (generatedCards && generatedCards.length > 0) {
-          db.update("flashcards", (cards) => [
-            ...generatedCards.map((c, idx) => ({
-              id: `fc_${jobId}_${idx + 1}`,
-              deckId: `deck_${resourceId}`,
-              deckTitle:
-                resourceTitle.length > 35 ? resourceTitle.slice(0, 35) + "..." : resourceTitle,
-              lectureId: resourceId,
-              front: c.front,
-              back: c.back,
-              sourceReference: c.sourceReference,
-              topic: c.topic,
-              difficulty: c.difficulty,
-              mastered: false,
-              reviewCount: 0,
-              createdAt: now,
-            })),
-            ...cards.filter((c) => c.lectureId !== resourceId),
-          ]);
-          notifySync({ type: "FlashcardsReady", id: resourceId, jobId, progress: 97 });
-        }
-
-        if (generatedMindMap) {
-          db.update("mindMaps", (maps) => [
-            {
-              id: `mm_${jobId}`,
-              title: resourceTitle,
-              lectureId: resourceId,
-              rootNode: generatedMindMap,
-              createdAt: now,
-            },
-            ...maps.filter((m) => m.lectureId !== resourceId),
-          ]);
-        }
-      } catch {
-        // non-blocking
-      }
-    }
-
-    // 8. Completed
     updateJob(jobId, { status: "Completed", stage: "Completed", progressPercent: 100 });
     logPipelineEvent("info", "job_completed", {
       jobId,
       resourceId,
       resourceType,
       segmentsCount: segments.length,
-      keywordsCount: keywords.length,
       durationSeconds,
     });
-    db.update("notifications", (notifs) => [
-      {
-        id: `notif_${Date.now()}`,
-        userId: db.get("jobs").find((j) => j.id === jobId)?.userId || "usr_admin",
-        title:
-          resourceType === "meeting" ? "Meeting analysis completed" : "Lecture analysis completed",
-        body: `Processed "${resourceTitle}" (${segments.length} transcript segments).`,
-        targetUrl: `/transcript?id=${resourceId}`,
-        read: false,
-        type: "summary",
-        createdAt: now,
-      },
-      ...notifs,
-    ]);
-
-    notifySync({ type: "ProcessingCompleted", id: resourceId, jobId, progress: 100 });
+    notifySync({
+      type: "ProcessingCompleted",
+      userId: jobOwnerId,
+      id: resourceId,
+      resourceId,
+      resourceType,
+      jobId,
+      progress: 100,
+    });
   } catch (error) {
     const errMessage = error instanceof Error ? error.message : "Unknown processing error";
     const { category, transient } = classifyFailureCategory(errMessage);
@@ -1710,4 +1509,638 @@ export function recoverInterruptedJobs() {
       });
     }
   }
+}
+
+/**
+ * Safely returns the isolated directory where live audio chunks for a session are stored.
+ */
+export function getLiveSessionChunksDir(sessionId: string): string {
+  const safeId = sessionId.replace(/[^a-zA-Z0-9_-]/g, "");
+  if (!safeId || safeId.length < 3 || safeId.length > 80) {
+    throw new Error("Invalid sessionId");
+  }
+  const target = path.resolve(CHUNKS_BASE_DIR, `live_${safeId}`);
+  const baseWithSep = path.resolve(CHUNKS_BASE_DIR) + path.sep;
+  if (!target.startsWith(baseWithSep)) {
+    throw new Error("Invalid live session chunk directory path");
+  }
+  return target;
+}
+
+/**
+ * Concatenates all persisted live audio chunks for a session into one canonical
+ * playable audio file using ffmpeg (avoiding multi-hour browser base64 uploads).
+ */
+export async function assembleLiveAudioChunks(
+  sessionId: string,
+  outputPath: string,
+): Promise<{ assembledPath?: string; durationSeconds: number }> {
+  const dir = getLiveSessionChunksDir(sessionId);
+  if (!fs.existsSync(dir)) {
+    return { durationSeconds: 0 };
+  }
+
+  const files = fs
+    .readdirSync(dir)
+    .filter((f) => /^chunk_\d+\.(wav|webm|ogg|m4a|mp3)$/i.test(f))
+    .sort((a, b) => {
+      const na = parseInt(a.match(/^chunk_(\d+)/)?.[1] || "0", 10);
+      const nb = parseInt(b.match(/^chunk_(\d+)/)?.[1] || "0", 10);
+      return na - nb;
+    });
+
+  if (files.length === 0) {
+    return { durationSeconds: 0 };
+  }
+
+  const outputDir = path.dirname(outputPath);
+  if (!fs.existsSync(outputDir)) {
+    fs.mkdirSync(outputDir, { recursive: true });
+  }
+
+  // Normalize each chunk to 16kHz mono WAV if needed, then concat cleanly
+  const normalizedList: string[] = [];
+  for (let i = 0; i < files.length; i++) {
+    const src = path.join(dir, files[i]);
+    if (files[i].endsWith(".wav")) {
+      normalizedList.push(src);
+    } else {
+      const wavOut = path.join(dir, `norm_${String(i).padStart(5, "0")}.wav`);
+      try {
+        await execFileAsync(
+          "ffmpeg",
+          [
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-err_detect",
+            "ignore_err",
+            "-i",
+            src,
+            "-vn",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            wavOut,
+          ],
+          { timeout: 30000, maxBuffer: 4 * 1024 * 1024 },
+        );
+        if (fs.existsSync(wavOut) && fs.statSync(wavOut).size > 256) {
+          normalizedList.push(wavOut);
+        }
+      } catch {
+        // skip unreadable individual slice without failing the full recording
+      }
+    }
+  }
+
+  if (normalizedList.length === 0) {
+    return { durationSeconds: 0 };
+  }
+
+  if (normalizedList.length === 1) {
+    fs.copyFileSync(normalizedList[0], outputPath);
+    const dur = await probeDurationSeconds(outputPath);
+    return { assembledPath: outputPath, durationSeconds: Math.max(1, Math.round(dur || 1)) };
+  }
+
+  const listPath = path.join(dir, "concat_list.txt");
+  const listContent = normalizedList.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join("\n");
+  fs.writeFileSync(listPath, listContent, "utf-8");
+
+  try {
+    await execFileAsync(
+      "ffmpeg",
+      [
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        listPath,
+        "-acodec",
+        "pcm_s16le",
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        outputPath,
+      ],
+      { timeout: 120000, maxBuffer: 10 * 1024 * 1024 },
+    );
+    if (fs.existsSync(outputPath) && fs.statSync(outputPath).size > 512) {
+      const dur = await probeDurationSeconds(outputPath);
+      return { assembledPath: outputPath, durationSeconds: Math.max(1, Math.round(dur || 1)) };
+    }
+  } catch (err) {
+    console.warn("Failed to concat live audio chunks:", err);
+  }
+
+  return { durationSeconds: 0 };
+}
+
+export interface UnifiedPipelineParams {
+  resourceType: "meeting" | "lecture";
+  resourceId: string;
+  title: string;
+  courseCode?: string;
+  language: string;
+  durationSeconds: number;
+  segments: TranscriptSegment[];
+  userId: string;
+  jobId?: string;
+  recordingPath?: string;
+  recordingFileName?: string;
+  audioUrl?: string;
+  checkCancelled?: () => void;
+}
+
+export interface UnifiedPipelineResult {
+  summary: string;
+  keyPoints: string[];
+  decisions: string[];
+  keywordsCount: number;
+  highlightsCount: number;
+  tasksCount: number;
+  quizQuestionsCount: number;
+  flashcardsCount: number;
+  hasMindMap: boolean;
+}
+
+/**
+ * UNIFIED POST-TRANSCRIPTION AI INTELLIGENCE PIPELINE
+ * Executed identically for BOTH uploaded audio files (`processRecordingJob`)
+ * AND finalized live recordings (`/api/v1/transcripts/live-session/finalize`).
+ */
+export async function runUnifiedPostTranscriptionPipeline(
+  params: UnifiedPipelineParams,
+): Promise<UnifiedPipelineResult> {
+  const {
+    resourceType,
+    resourceId,
+    title,
+    courseCode,
+    language,
+    durationSeconds,
+    segments,
+    userId,
+    jobId,
+    recordingPath,
+    recordingFileName,
+    audioUrl,
+    checkCancelled,
+  } = params;
+
+  const fullText = segments.map((s) => `${s.speaker}: ${s.text}`).join("\n");
+  const runId = jobId || `live_${resourceId}_${Date.now()}`;
+
+  if (jobId) {
+    updateJob(jobId, { status: "Analyzing", stage: "AIAnalysis", progressPercent: 80 });
+  }
+  notifySync({
+    type: "AIAnalysisStarted",
+    userId,
+    id: resourceId,
+    resourceId,
+    resourceType,
+    jobId,
+    progress: 80,
+  });
+
+  // 1. Keywords (ranked with frequency, importance, context, timestamps) & Important Sentences
+  const keywords = extractKeywordsWithFrequency(segments, 12);
+  const cueHighlights = extractHighlightsFromSegments(segments);
+  notifySync({
+    type: "KeywordsReady",
+    userId,
+    id: resourceId,
+    resourceId,
+    resourceType,
+    jobId,
+    progress: 83,
+  });
+
+  // 2. Concurrent Summary + Deep Lecture/Meeting Analysis (strictly transcript-grounded)
+  const [analysis, deepAnalysis] = await Promise.all([
+    generateAiSummary(title, segments, resourceType, courseCode),
+    generateAiLectureAnalysis(title, segments, resourceType, courseCode).catch(() => undefined),
+  ]);
+
+  checkCancelled?.();
+
+  // Merge AI-detected important sentences with cue-based highlights (preserving timestamps)
+  const highlights = [...cueHighlights];
+  if (deepAnalysis?.importantSentences?.length) {
+    for (const sentence of deepAnalysis.importantSentences) {
+      const cleanSent = String(sentence || "").trim();
+      if (!cleanSent) continue;
+      const already = highlights.some(
+        (h) => h.quote.includes(cleanSent) || cleanSent.includes(h.quote),
+      );
+      if (!already) {
+        const matchedSeg = segments.find(
+          (s) => s.text.includes(cleanSent.slice(0, 24)) || cleanSent.includes(s.text.slice(0, 24)),
+        );
+        const mins = Math.floor((matchedSeg?.startTime || 0) / 60);
+        const secs = Math.floor((matchedSeg?.startTime || 0) % 60);
+        highlights.push({
+          quote: cleanSent,
+          context: matchedSeg
+            ? `From ${matchedSeg.speaker}`
+            : "Identified key sentence from transcript",
+          speaker: matchedSeg?.speaker,
+          timestamp: `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`,
+          category: "ImportantSentence",
+          priority: "high",
+        });
+      }
+    }
+  }
+
+  notifySync({
+    type: "SummaryReady",
+    userId,
+    id: resourceId,
+    resourceId,
+    resourceType,
+    jobId,
+    progress: 87,
+  });
+
+  // 3. Verified Grounded Quiz, Flashcards, and Mind Map concurrently
+  if (jobId) {
+    updateJob(jobId, { status: "Generating Quiz", stage: "QuizGeneration", progressPercent: 90 });
+  }
+
+  const [generatedQuiz, generatedCards, generatedMindMap] = await Promise.all([
+    generateAiQuiz(title, segments, analysis.summary, courseCode).catch(() => undefined),
+    generateAiFlashcards(title, segments, analysis.summary, courseCode).catch(() => []),
+    generateAiMindMap(title, segments, analysis.summary, courseCode).catch(() => undefined),
+  ]);
+
+  checkCancelled?.();
+
+  if (generatedQuiz && generatedQuiz.questions.length > 0) {
+    notifySync({
+      type: "QuizReady",
+      userId,
+      id: resourceId,
+      resourceId,
+      resourceType,
+      jobId,
+      progress: 93,
+    });
+  }
+
+  // Merge tasks from summary + deepAnalysis without fabricating owners/deadlines
+  const combinedTasks: Array<{
+    title: string;
+    ownerName: string;
+    dueDate?: string;
+    deadlineText: string;
+    sourceTimestamp?: string;
+    priority: "high" | "medium" | "low";
+  }> = [];
+  const seenTasks = new Set<string>();
+
+  for (const item of analysis.actionItems || []) {
+    const key = item.title.trim().toLowerCase();
+    if (!key || seenTasks.has(key)) continue;
+    seenTasks.add(key);
+    const deadline =
+      item.dueDate && item.dueDate !== "Deadline not specified." ? item.dueDate : "Not specified";
+    combinedTasks.push({
+      title: item.title.trim(),
+      ownerName: item.ownerName && item.ownerName.trim() ? item.ownerName.trim() : "Not specified",
+      dueDate: deadline === "Not specified" ? undefined : deadline,
+      deadlineText: deadline,
+      sourceTimestamp: item.sourceTimestamp,
+      priority: item.priority || "medium",
+    });
+  }
+  for (const item of deepAnalysis?.actionItems || []) {
+    const taskTitle = (item.task || "").trim();
+    const key = taskTitle.toLowerCase();
+    if (!key || seenTasks.has(key)) continue;
+    seenTasks.add(key);
+    const deadline =
+      item.deadline && item.deadline !== "Deadline not specified." && item.deadline !== "null"
+        ? item.deadline
+        : "Not specified";
+    combinedTasks.push({
+      title: taskTitle,
+      ownerName: item.owner && item.owner !== "null" ? item.owner.trim() : "Not specified",
+      dueDate: deadline === "Not specified" ? undefined : deadline,
+      deadlineText: deadline,
+      priority: "medium",
+    });
+  }
+
+  const now = new Date().toISOString();
+
+  // 4. Persist Record + All Derived Intelligence Artifacts Atomically
+  if (resourceType === "meeting") {
+    const targetMeeting = db.get("meetings").find((m) => m.id === resourceId);
+    const ownerId = targetMeeting?.hostId || userId || "usr_admin";
+
+    db.update("meetings", (meetings) =>
+      meetings.map((m) => {
+        if (m.id !== resourceId) return m;
+        return {
+          ...m,
+          status: "Completed",
+          language,
+          durationSeconds: Math.max(1, durationSeconds, m.durationSeconds || 1),
+          recordingPath: recordingPath || m.recordingPath,
+          recordingFileName: recordingFileName || m.recordingFileName,
+          audioUrl: audioUrl || m.audioUrl,
+          summary: analysis.summary,
+          executiveSummary: analysis.executiveSummary || analysis.summary,
+          detailedSummary: analysis.detailedSummary || analysis.summary,
+          keyPoints: analysis.keyPoints,
+          decisions: analysis.decisions,
+          topics: deepAnalysis?.topics?.length
+            ? deepAnalysis.topics
+            : keywords.slice(0, 5).map((k) => k.term),
+          keywords,
+          highlights,
+          analysis: deepAnalysis
+            ? {
+                topics: deepAnalysis.topics,
+                keywords: deepAnalysis.keywords,
+                definitions: deepAnalysis.definitions,
+                questionsAsked: deepAnalysis.questionsAsked,
+                actionItems: deepAnalysis.actionItems,
+                emphasizedPoints: deepAnalysis.emphasizedPoints,
+                reviewAreas: deepAnalysis.reviewAreas,
+              }
+            : undefined,
+          fullText,
+          segments,
+          updatedAt: now,
+        };
+      }),
+    );
+
+    if (combinedTasks.length > 0) {
+      db.update("actionItems", (items) => [
+        ...items.filter((i) => i.meetingId !== resourceId),
+        ...combinedTasks.map((t, idx) => ({
+          id: `task_${runId}_${idx + 1}`,
+          userId: ownerId,
+          meetingId: resourceId,
+          title: t.title,
+          ownerName: t.ownerName,
+          deadlineText: t.deadlineText,
+          dueDate: t.dueDate,
+          sourceTimestamp: t.sourceTimestamp,
+          priority: t.priority,
+          completed: false,
+          createdAt: now,
+        })),
+      ]);
+      notifySync({
+        type: "TasksReady",
+        userId: ownerId,
+        id: resourceId,
+        resourceId,
+        resourceType,
+        jobId,
+        progress: 95,
+      });
+    }
+
+    if (generatedQuiz && generatedQuiz.questions.length > 0) {
+      db.update("quizzes", (quizzes) => [
+        {
+          id: `quiz_${runId}`,
+          meetingId: resourceId,
+          title: generatedQuiz.title,
+          questions: generatedQuiz.questions,
+          attemptsCount: 0,
+          createdAt: now,
+        },
+        ...quizzes.filter((q) => q.meetingId !== resourceId),
+      ]);
+    }
+
+    if (generatedCards && generatedCards.length > 0) {
+      db.update("flashcards", (cards) => [
+        ...generatedCards.map((c, idx) => ({
+          id: `fc_${runId}_${idx + 1}`,
+          deckId: `deck_${resourceId}`,
+          deckTitle: title.length > 35 ? title.slice(0, 35) + "..." : title,
+          meetingId: resourceId,
+          front: c.front,
+          back: c.back,
+          sourceReference: c.sourceReference,
+          topic: c.topic,
+          difficulty: c.difficulty,
+          mastered: false,
+          reviewCount: 0,
+          createdAt: now,
+        })),
+        ...cards.filter((c) => c.meetingId !== resourceId),
+      ]);
+      notifySync({
+        type: "FlashcardsReady",
+        userId: ownerId,
+        id: resourceId,
+        resourceId,
+        resourceType,
+        jobId,
+        progress: 97,
+      });
+    }
+
+    if (generatedMindMap) {
+      db.update("mindMaps", (maps) => [
+        {
+          id: `mm_${runId}`,
+          title,
+          meetingId: resourceId,
+          rootNode: generatedMindMap,
+          createdAt: now,
+        },
+        ...maps.filter((m) => m.meetingId !== resourceId),
+      ]);
+    }
+  } else {
+    const targetLecture = db.get("lectures").find((l) => l.id === resourceId);
+    const ownerId = targetLecture?.instructorId || userId || "usr_admin";
+
+    db.update("lectures", (lectures) =>
+      lectures.map((l) => {
+        if (l.id !== resourceId) return l;
+        return {
+          ...l,
+          status: "Completed",
+          language,
+          durationSeconds: Math.max(1, durationSeconds, l.durationSeconds || 1),
+          recordingPath: recordingPath || l.recordingPath,
+          recordingFileName: recordingFileName || l.recordingFileName,
+          audioUrl: audioUrl || l.audioUrl,
+          studyNotes: analysis.summary,
+          summary: analysis.summary,
+          executiveSummary: analysis.executiveSummary || analysis.summary,
+          detailedSummary: analysis.detailedSummary || analysis.summary,
+          keyConcepts: deepAnalysis?.definitions?.length
+            ? deepAnalysis.definitions.map((d) => ({ term: d.term, definition: d.definition }))
+            : [],
+          examHighlights: deepAnalysis?.emphasizedPoints?.length
+            ? deepAnalysis.emphasizedPoints
+            : analysis.keyPoints,
+          topics: deepAnalysis?.topics?.length
+            ? deepAnalysis.topics
+            : keywords.slice(0, 5).map((k) => k.term),
+          keywords,
+          highlights,
+          analysis: deepAnalysis
+            ? {
+                topics: deepAnalysis.topics,
+                keywords: deepAnalysis.keywords,
+                definitions: deepAnalysis.definitions,
+                questionsAsked: deepAnalysis.questionsAsked,
+                actionItems: deepAnalysis.actionItems,
+                emphasizedPoints: deepAnalysis.emphasizedPoints,
+                reviewAreas: deepAnalysis.reviewAreas,
+              }
+            : undefined,
+          fullText,
+          segments,
+          updatedAt: now,
+        };
+      }),
+    );
+
+    if (generatedQuiz && generatedQuiz.questions.length > 0) {
+      db.update("quizzes", (quizzes) => [
+        {
+          id: `quiz_${runId}`,
+          lectureId: resourceId,
+          title: generatedQuiz.title,
+          courseCode,
+          questions: generatedQuiz.questions,
+          attemptsCount: 0,
+          createdAt: now,
+        },
+        ...quizzes.filter((q) => q.lectureId !== resourceId),
+      ]);
+    }
+
+    if (combinedTasks.length > 0) {
+      db.update("actionItems", (items) => [
+        ...items.filter((i) => i.lectureId !== resourceId),
+        ...combinedTasks.map((t, idx) => ({
+          id: `task_${runId}_${idx + 1}`,
+          userId: ownerId,
+          lectureId: resourceId,
+          title: t.title,
+          ownerName: t.ownerName,
+          deadlineText: t.deadlineText,
+          dueDate: t.dueDate,
+          sourceTimestamp: t.sourceTimestamp,
+          priority: t.priority,
+          completed: false,
+          createdAt: now,
+        })),
+      ]);
+      notifySync({
+        type: "TasksReady",
+        userId: ownerId,
+        id: resourceId,
+        resourceId,
+        resourceType,
+        jobId,
+        progress: 95,
+      });
+    }
+
+    if (generatedCards && generatedCards.length > 0) {
+      db.update("flashcards", (cards) => [
+        ...generatedCards.map((c, idx) => ({
+          id: `fc_${runId}_${idx + 1}`,
+          deckId: `deck_${resourceId}`,
+          deckTitle: title.length > 35 ? title.slice(0, 35) + "..." : title,
+          lectureId: resourceId,
+          front: c.front,
+          back: c.back,
+          sourceReference: c.sourceReference,
+          topic: c.topic,
+          difficulty: c.difficulty,
+          mastered: false,
+          reviewCount: 0,
+          createdAt: now,
+        })),
+        ...cards.filter((c) => c.lectureId !== resourceId),
+      ]);
+      notifySync({
+        type: "FlashcardsReady",
+        userId: ownerId,
+        id: resourceId,
+        resourceId,
+        resourceType,
+        jobId,
+        progress: 97,
+      });
+    }
+
+    if (generatedMindMap) {
+      db.update("mindMaps", (maps) => [
+        {
+          id: `mm_${runId}`,
+          title,
+          lectureId: resourceId,
+          rootNode: generatedMindMap,
+          createdAt: now,
+        },
+        ...maps.filter((m) => m.lectureId !== resourceId),
+      ]);
+    }
+  }
+
+  db.update("notifications", (notifs) => [
+    {
+      id: `notif_${Date.now()}`,
+      userId: userId || "usr_admin",
+      title:
+        resourceType === "meeting" ? "Meeting analysis completed" : "Lecture analysis completed",
+      body: `Processed "${title}" (${segments.length} transcript segments).`,
+      targetUrl: `/transcript?id=${resourceId}`,
+      read: false,
+      type: "summary",
+      createdAt: now,
+    },
+    ...notifs,
+  ]);
+
+  notifySync({
+    type: "AnalysisCompleted",
+    userId,
+    id: resourceId,
+    resourceId,
+    resourceType,
+    jobId,
+    progress: 100,
+  });
+
+  return {
+    summary: analysis.summary,
+    keyPoints: analysis.keyPoints,
+    decisions: analysis.decisions,
+    keywordsCount: keywords.length,
+    highlightsCount: highlights.length,
+    tasksCount: combinedTasks.length,
+    quizQuestionsCount: generatedQuiz?.questions.length || 0,
+    flashcardsCount: generatedCards?.length || 0,
+    hasMindMap: Boolean(generatedMindMap),
+  };
 }

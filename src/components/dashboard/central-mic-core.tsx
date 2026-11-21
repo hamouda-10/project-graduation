@@ -486,7 +486,21 @@ export function CentralMicCore({ isArabic, onActivateMic, className = "" }: Cent
   return (
     <div
       ref={rootRef}
-      className={`relative flex flex-col items-center justify-between py-2 px-3 select-none overflow-hidden rounded-2xl border border-[#D4AF37]/20 bg-[#0A0A0C]/70 ${className}`}
+      role="button"
+      tabIndex={0}
+      onClick={onActivateMic}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          if (onActivateMic) onActivateMic();
+        }
+      }}
+      title={
+        isArabic
+          ? "نواة معالجة الكلام الذكية — اضغط في أي مكان لبدء التفريغ الصوتي الحي"
+          : "AI Speech Intelligence Core — Click anywhere to open live microphone recording"
+      }
+      className={`group/card relative flex flex-col items-center justify-between py-2 px-3 select-none overflow-hidden rounded-2xl border border-[#D4AF37]/25 hover:border-[#D4AF37]/60 bg-[#0A0A0C]/70 hover:bg-[#0E0E12]/85 transition-colors cursor-pointer ${className}`}
     >
       {/* Hardware-Accelerated 2D Canvas: Orbiting Particle System, Volumetric Glow, Circular Spectrum & Energy Ripples */}
       <canvas ref={canvasRef} className="pointer-events-none absolute inset-0 h-full w-full" />
@@ -531,7 +545,10 @@ export function CentralMicCore({ isArabic, onActivateMic, className = "" }: Cent
           <button
             ref={micCapsuleRef}
             type="button"
-            onClick={onActivateMic}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (onActivateMic) onActivateMic();
+            }}
             title={
               isArabic
                 ? "نواة معالجة الكلام الذكية — اضغط لبدء التفريغ الصوتي الحي"
